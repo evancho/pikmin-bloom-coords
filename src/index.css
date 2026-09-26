@@ -1,0 +1,99 @@
+:root {
+  --bg0: #e7f0e4;
+  --bg1: #d5e6d0;
+  --ink: #1a2e22;
+  --ink-soft: #3d5646;
+  --leaf: #2f6b4f;
+  --leaf-deep: #1e4a36;
+  --petal: #c45c4a;
+  --petal-soft: #f3d4ce;
+  --card: rgba(255, 252, 245, 0.88);
+  --line: rgba(26, 46, 34, 0.12);
+  --shadow: 0 18px 50px rgba(30, 74, 54, 0.14);
+  --radius: 22px;
+  --font-display: 'Fraunces', 'Noto Sans JP', serif;
+  --font-body: 'Noto Sans TC', 'Noto Sans JP', system-ui, sans-serif;
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(1200px 600px at 10% -10%, #f7f4e8 0%, transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, #cfe3c8 0%, transparent 50%),
+    linear-gradient(165deg, var(--bg0), var(--bg1));
+  background-attachment: fixed;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.35;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='0.35'/%3E%3C/svg%3E");
+  mix-blend-mode: soft-light;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: var(--leaf-deep);
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes heart-pop {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.25);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
