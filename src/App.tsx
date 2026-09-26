@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { InstallGuide } from './components/InstallGuide'
+import { UpdateBanner } from './components/UpdateBanner'
 import { formatCoords, isValidCoordsText, parseCoordsText } from './lib/coords'
 import { geocodeBest, googleMapsUrl, mapUrl } from './lib/geocode'
-import { recognizeText } from './lib/ocr'
-import { parseLocationFromOcr, localityHints } from './lib/parseLocation'
+import { recognizeMany } from './lib/ocr'
+import {
+  localityHints,
+  mergeParsedLocations,
+  parseLocationFromOcr,
+} from './lib/parseLocation'
 import {
   deleteArchiveItem,
   fileToDataUrl,
@@ -14,11 +19,15 @@ import {
 } from './lib/storage'
 import { exportSyncFile, importSyncFile } from './lib/sync'
 import type { ArchiveItem, GeocodeCandidate, WorkItem } from './types'
+import { archiveImages } from './types'
 
 type Tab = 'work' | 'archive'
 
+/** App build shown in UI so iOS users can confirm they got the update. */
+export const APP_BUILD = 'v1.2-dual-slots'
+
 const emptyWork = (): WorkItem => ({
-  imageDataUrl: '',
+  imageDataUrls: [],
   title: '',
   address: '',
   description: '',
@@ -31,6 +40,15 @@ const emptyWork = (): WorkItem => ({
   statusMessage: '',
 })
 
+type ShotSlots = {
+  postcard: File | null
+  map: File | null
+}
+
+function slotsToFiles(slots: ShotSlots): File[] {
+  return [slots.postcard, slots.map].filter((f): f is File => f != null)
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>('work')
   const [work, setWork] = useState<WorkItem>(emptyWork)
@@ -39,8 +57,11 @@ export default function App() {
   const [copied, setCopied] = useState(false)
   const [heartBurst, setHeartBurst] = useState(false)
   const [syncMessage, setSyncMessage] = useState('')
+  const [slots, setSlots] = useState<ShotSlots>({ postcard: null, map: null })
   const abortRef = useRef<AbortController | null>(null)
-  const fileInputRef = useRef<HTMLInputElement>(null)
+  const postcardInputRef = useRef<HTMLInputElement>(null)
+  const mapInputRef = useRef<HTMLInputElement>(null)
+  const slotsRef = useRef<ShotSlots>({ postcard: null, map: null })
 
   const refreshArchive = useCallback(async () => {
     setArchive(await listArchive())
@@ -50,7 +71,18 @@ export default function App() {
     void refreshArchive()
   }, [refreshArchive])
 
-  const handleFile = useCallback(async (file: File) => {
+  const runPipeline = useCallback(async (nextSlots: ShotSlots) => {
+    const files = slotsToFiles(nextSlots)
+    slotsRef.current = nextSlots
+    setSlots(nextSlots)
+
+    if (!files.length) {
+      abortRef.current?.abort()
+      setWork(emptyWork())
+      setBusy(false)
+      return
+    }
+
     abortRef.current?.abort()
     const ac = new AbortController()
     abortRef.current = ac
@@ -58,25 +90,33 @@ export default function App() {
     setTab('work')
     setCopied(false)
 
-    const dataUrl = await fileToDataUrl(file)
+    const dataUrls = await Promise.all(files.map((f) => fileToDataUrl(f)))
+    // Keep UI aligned with slots: postcard then map (empty slot omitted from urls list
+    // but we also store parallel labeled previews via slotPreview below)
     setWork({
       ...emptyWork(),
-      imageDataUrl: dataUrl,
+      imageDataUrls: dataUrls,
       status: 'ocr',
-      statusMessage: '正在辨識截圖文字…',
+      statusMessage:
+        files.length > 1
+          ? '正在辨識明信片＋地圖兩張截圖…'
+          : nextSlots.map
+            ? '正在辨識地圖截圖…'
+            : '正在辨識明信片截圖…',
     })
 
     try {
-      const text = await recognizeText(file)
+      const texts = await recognizeMany(files)
       if (ac.signal.aborted) return
 
-      const parsed = parseLocationFromOcr(text)
+      const parts = texts.map((t) => parseLocationFromOcr(t))
+      const parsed = mergeParsedLocations(parts)
       setWork((w) => ({
         ...w,
         title: parsed.title ?? '',
         address: parsed.address ?? '',
         description: parsed.description ?? '',
-        ocrText: text,
+        ocrText: parsed.rawText,
         status: 'geocode',
         statusMessage: '正在查詢座標…',
       }))
@@ -97,7 +137,7 @@ export default function App() {
         coordsText: best ? formatCoords(best.lat, best.lng) : '',
         status: 'ready',
         statusMessage: best
-          ? `已找到 ${candidates.length} 個候選座標，可編輯後按愛心歸檔`
+          ? `已用 ${files.length} 張截圖找到 ${candidates.length} 個候選，可編輯後歸檔`
           : '找不到自動座標，請手動輸入 緯度, 經度',
       }))
     } catch (err) {
@@ -113,29 +153,52 @@ export default function App() {
     }
   }, [])
 
+  const assignSlot = useCallback(
+    (which: keyof ShotSlots, file: File | null) => {
+      const next = { ...slotsRef.current, [which]: file }
+      void runPipeline(next)
+    },
+    [runPipeline],
+  )
+
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
       const items = e.clipboardData?.items
       if (!items) return
+      const files: File[] = []
       for (const item of items) {
         if (item.type.startsWith('image/')) {
           const file = item.getAsFile()
-          if (file) {
-            e.preventDefault()
-            void handleFile(file)
-          }
-          break
+          if (file) files.push(file)
         }
       }
+      if (!files.length) return
+      e.preventDefault()
+      // Fill empty slots in order: postcard → map
+      const next = { ...slotsRef.current }
+      for (const f of files) {
+        if (!next.postcard) next.postcard = f
+        else if (!next.map) next.map = f
+        else break
+      }
+      void runPipeline(next)
     }
     window.addEventListener('paste', onPaste)
     return () => window.removeEventListener('paste', onPaste)
-  }, [handleFile])
+  }, [runPipeline])
 
   const favoritedCount = useMemo(
     () => archive.filter((a) => a.favorited).length,
     [archive],
   )
+
+  const mapPreview = useMemo(() => {
+    if (!slots.map) return ''
+    if (slots.postcard) return work.imageDataUrls[1] ?? ''
+    return work.imageDataUrls[0] ?? ''
+  }, [slots.postcard, slots.map, work.imageDataUrls])
+
+  const postcardSrc = slots.postcard ? (work.imageDataUrls[0] ?? '') : ''
 
   function onCoordsChange(value: string) {
     const parsed = parseCoordsText(value)
@@ -214,7 +277,7 @@ export default function App() {
   }
 
   async function saveToArchive(favorited: boolean) {
-    if (!work.imageDataUrl) return
+    if (!work.imageDataUrls.length) return
     if (work.coordsText && !isValidCoordsText(work.coordsText)) {
       setWork((w) => ({
         ...w,
@@ -227,7 +290,8 @@ export default function App() {
       id: newId(),
       createdAt: now,
       updatedAt: now,
-      imageDataUrl: work.imageDataUrl,
+      imageDataUrl: work.imageDataUrls[0]!,
+      imageDataUrls: work.imageDataUrls,
       title: work.title || '未命名地點',
       address: work.address,
       coordsText: work.coordsText,
@@ -304,14 +368,17 @@ export default function App() {
 
   const hearts = archive.filter((a) => a.favorited)
   const others = archive.filter((a) => !a.favorited)
+  const hasAnyShot = Boolean(slots.postcard || slots.map)
 
   return (
-    <div className="app">
+    <>
+      <UpdateBanner />
+      <div className="app">
       <header className="hero">
-        <p className="eyebrow">Pikmin Bloom</p>
+        <p className="eyebrow">Pikmin Bloom · {APP_BUILD}</p>
         <h1 className="brand">Bloom Pin</h1>
         <p className="tagline">
-          上傳明信片或地圖截圖，找出座標，編輯後用愛心歸檔。
+          分開選「明信片」與「地圖」兩張截圖（iPhone 適用），合併後找座標並愛心歸檔。
         </p>
       </header>
 
@@ -340,49 +407,116 @@ export default function App() {
 
       {tab === 'work' ? (
         <main className="panel rise">
-          <section
-            className={`dropzone ${busy ? 'busy' : ''}`}
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={(e) => {
-              e.preventDefault()
-              const f = e.dataTransfer.files?.[0]
-              if (f) void handleFile(f)
-            }}
-            onClick={() => fileInputRef.current?.click()}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault()
-                fileInputRef.current?.click()
-              }
-            }}
-          >
+          <p className="slots-hint">
+            iPhone 請各點一次選圖（不要依賴一次多選）。兩格都選完會自動合併辨識。
+          </p>
+
+          <div className={`slot-grid ${busy ? 'busy' : ''}`}>
             <input
-              ref={fileInputRef}
+              ref={postcardInputRef}
               type="file"
               accept="image/*"
               hidden
               onChange={(e) => {
-                const f = e.target.files?.[0]
-                if (f) void handleFile(f)
+                const f = e.target.files?.[0] ?? null
+                assignSlot('postcard', f)
                 e.target.value = ''
               }}
             />
-            {work.imageDataUrl ? (
-              <img
-                src={work.imageDataUrl}
-                alt="上傳的截圖"
-                className="preview"
-                onClick={(e) => e.stopPropagation()}
-              />
-            ) : (
-              <div className="drop-hint">
-                <strong>拖曳、點擊或 Ctrl+V 貼上截圖</strong>
-                <span>支援明信片詳情與地圖畫面</span>
-              </div>
-            )}
-          </section>
+            <input
+              ref={mapInputRef}
+              type="file"
+              accept="image/*"
+              hidden
+              onChange={(e) => {
+                const f = e.target.files?.[0] ?? null
+                assignSlot('map', f)
+                e.target.value = ''
+              }}
+            />
+
+            <div
+              className={`slot-card ${slots.postcard ? 'filled' : ''}`}
+              role="button"
+              tabIndex={busy ? -1 : 0}
+              onClick={() => {
+                if (!busy) postcardInputRef.current?.click()
+              }}
+              onKeyDown={(e) => {
+                if (busy) return
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  postcardInputRef.current?.click()
+                }
+              }}
+            >
+              {postcardSrc ? (
+                <img src={postcardSrc} alt="明信片截圖" />
+              ) : (
+                <span className="slot-empty">
+                  <strong>① 明信片</strong>
+                  <em>點這裡選詳情截圖</em>
+                </span>
+              )}
+              <span className="slot-label">
+                明信片
+                {slots.postcard && (
+                  <button
+                    type="button"
+                    className="shot-remove"
+                    disabled={busy}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      assignSlot('postcard', null)
+                    }}
+                  >
+                    清除
+                  </button>
+                )}
+              </span>
+            </div>
+
+            <div
+              className={`slot-card ${slots.map ? 'filled' : ''}`}
+              role="button"
+              tabIndex={busy ? -1 : 0}
+              onClick={() => {
+                if (!busy) mapInputRef.current?.click()
+              }}
+              onKeyDown={(e) => {
+                if (busy) return
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  mapInputRef.current?.click()
+                }
+              }}
+            >
+              {mapPreview ? (
+                <img src={mapPreview} alt="地圖截圖" />
+              ) : (
+                <span className="slot-empty">
+                  <strong>② 地圖</strong>
+                  <em>點這裡選地圖截圖</em>
+                </span>
+              )}
+              <span className="slot-label">
+                地圖
+                {slots.map && (
+                  <button
+                    type="button"
+                    className="shot-remove"
+                    disabled={busy}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      assignSlot('map', null)
+                    }}
+                  >
+                    清除
+                  </button>
+                )}
+              </span>
+            </div>
+          </div>
 
           {work.status !== 'idle' && (
             <p className={`status ${work.status}`} aria-live="polite">
@@ -391,7 +525,7 @@ export default function App() {
             </p>
           )}
 
-          {work.imageDataUrl && (
+          {hasAnyShot && (
             <section className="editor rise">
               <label className="field">
                 <span>地點名稱</span>
@@ -489,7 +623,7 @@ export default function App() {
 
               {work.ocrText && (
                 <details className="ocr-raw">
-                  <summary>OCR 原文</summary>
+                  <summary>OCR 原文（各張合併）</summary>
                   <pre>{work.ocrText}</pre>
                 </details>
               )}
@@ -498,7 +632,7 @@ export default function App() {
                 <button
                   type="button"
                   className="btn secondary"
-                  disabled={busy || !work.imageDataUrl}
+                  disabled={busy || !work.imageDataUrls.length}
                   onClick={() => void saveToArchive(false)}
                 >
                   儲存歸檔
@@ -506,7 +640,7 @@ export default function App() {
                 <button
                   type="button"
                   className={`btn heart ${heartBurst ? 'burst' : ''}`}
-                  disabled={busy || !work.imageDataUrl}
+                  disabled={busy || !work.imageDataUrls.length}
                   onClick={() => void saveToArchive(true)}
                   aria-label="愛心歸檔"
                 >
@@ -560,7 +694,8 @@ export default function App() {
           </p>
         </main>
       )}
-    </div>
+      </div>
+    </>
   )
 }
 
@@ -574,15 +709,33 @@ function ArchiveCard({
   onDelete: (id: string) => Promise<void>
 }) {
   const [coords, setCoords] = useState(item.coordsText)
+  const [shot, setShot] = useState(0)
   const valid = !coords || isValidCoordsText(coords)
+  const images = archiveImages(item)
 
   useEffect(() => {
     setCoords(item.coordsText)
+    setShot(0)
   }, [item.coordsText, item.id])
 
   return (
     <article className="card">
-      <img src={item.imageDataUrl} alt={item.title} />
+      <div className="card-shots">
+        <img src={images[shot] ?? item.imageDataUrl} alt={item.title} />
+        {images.length > 1 && (
+          <div className="card-shot-dots">
+            {images.map((_, i) => (
+              <button
+                key={i}
+                type="button"
+                className={i === shot ? 'on' : ''}
+                aria-label={`顯示截圖 ${i + 1}`}
+                onClick={() => setShot(i)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
       <div className="card-body">
         <div className="card-top">
           <input
