@@ -10,7 +10,9 @@ export default defineConfig(({ command }) => ({
   plugins: [
     react(),
     VitePWA({
-      registerType: 'autoUpdate',
+      // Prompt only: do not skipWaiting until the user taps 重新載入.
+      registerType: 'prompt',
+      injectRegister: false,
       includeAssets: [
         'favicon.svg',
         'apple-touch-icon.png',
@@ -49,6 +51,12 @@ export default defineConfig(({ command }) => ({
         ],
       },
       workbox: {
+        // New cache name so installs still on the autoUpdate precache pick up
+        // this prompt-banner build once, then wait for the in-app reload.
+        cacheId: 'bloom-pin-v1.2.0',
+        skipWaiting: false,
+        clientsClaim: true,
+        cleanupOutdatedCaches: true,
         globPatterns: ['**/*.{js,css,html,svg,png,ico,woff2}'],
         runtimeCaching: [
           {

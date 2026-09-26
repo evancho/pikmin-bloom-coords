@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { formatCoords, parseCoordsText } from './coords'
-import { parseLocationFromOcr } from './parseLocation'
+import {
+  mergeParsedLocations,
+  parseLocationFromOcr,
+} from './parseLocation'
 
 describe('coords', () => {
   it('formats latitude, longitude', () => {
@@ -43,5 +46,21 @@ describe('parseLocationFromOcr', () => {
     expect(parsed.title).toBe('滝神社')
     expect(parsed.address).toMatch(/佐伯市/)
     expect(parsed.searchQueries).toContain('瀧三柱神社 佐伯市')
+  })
+
+  it('merges postcard + map parses', () => {
+    const postcard = parseLocationFromOcr(`
+滝神社
+距離：1,600,188m 佐伯市 上浦大字浅海井浦
+暁嵐の滝にある神社。
+`)
+    const map = parseLocationFromOcr(`
+日代
+浅海井
+`)
+    const merged = mergeParsedLocations([postcard, map])
+    expect(merged.title).toBe('滝神社')
+    expect(merged.address).toContain('佐伯市')
+    expect(merged.searchQueries.some((q) => q.includes('浅海井'))).toBe(true)
   })
 })

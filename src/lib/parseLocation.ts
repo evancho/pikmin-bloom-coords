@@ -220,3 +220,62 @@ export function localityHints(parsed: ParsedLocation): string[] {
   }
   return hints
 }
+
+/**
+ * Merge postcard + map OCR parses: prefer postcard title/address,
+ * keep union of search queries (specific first).
+ */
+export function mergeParsedLocations(
+  parts: ParsedLocation[],
+): ParsedLocation {
+  if (parts.length === 0) {
+    return {
+      title: null,
+      address: null,
+      description: null,
+      searchQueries: [],
+      rawText: '',
+    }
+  }
+  if (parts.length === 1) return parts[0]!
+
+  const title =
+    parts.find((p) => p.title && /神社|寺|駅|公園|滝|瀧/.test(p.title))
+      ?.title ??
+    parts.find((p) => p.title)?.title ??
+    null
+
+  const address =
+    parts.find((p) => p.address && looksLikeAddress(p.address))?.address ??
+    parts.find((p) => p.address)?.address ??
+    null
+
+  const description =
+    parts.find((p) => p.description && /にある|参拝|訪れる|。/.test(p.description))
+      ?.description ??
+    parts.find((p) => p.description)?.description ??
+    null
+
+  const seen = new Set<string>()
+  const searchQueries: string[] = []
+  const push = (q: string) => {
+    if (!q || seen.has(q)) return
+    seen.add(q)
+    searchQueries.push(q)
+  }
+
+  // Prefer queries that combine title+address from any part
+  if (title && address) {
+    push(`${title} ${address}`)
+    push(`${title} ${address.replace(/\s+/g, '')}`)
+  }
+  for (const p of parts) {
+    for (const q of p.searchQueries) push(q)
+  }
+
+  const rawText = parts
+    .map((p, i) => `--- shot ${i + 1} ---\n${p.rawText}`)
+    .join('\n\n')
+
+  return { title, address, description, searchQueries, rawText }
+}

@@ -1,6 +1,6 @@
 # Bloom Pin — Pikmin Bloom 座標工具
 
-上傳 Pikmin Bloom 明信片／地圖截圖 → OCR 讀出地名與地址 → 查詢緯度、經度 → 可編輯後用愛心歸檔。
+分開上傳 Pikmin Bloom「明信片」與「地圖」截圖 → OCR 讀出地名與地址 → 查詢緯度、經度 → 可編輯後用愛心歸檔。
 
 **手機**：可安裝成主畫面 App（iPhone Safari／Android Chrome），並用「同步檔」在 iOS ↔ Android 共用喜好。
 
@@ -51,11 +51,12 @@ npm run dev
 
 ## 功能
 
-- 拖曳／點擊／貼上截圖
-- 日文＋英文 OCR（Tesseract.js）
+- 分開選擇「明信片」與「地圖」截圖（也可貼上；iPhone 各點一次）
+- 日文＋英文 OCR（Tesseract.js），兩張截圖合併查座標
 - 依地名／地址查座標（可手動修正）
-- 儲存／愛心歸檔（本機 IndexedDB）
+- 儲存／愛心歸檔（本機 IndexedDB，歸檔可切換多張截圖）
 - 匯出／匯入同步檔（跨裝置喜好）
+- 有新版本時顯示「有新版本可用」，點「重新載入」才更新
 
 ## 建置
 

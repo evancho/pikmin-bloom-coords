@@ -15,10 +15,11 @@ async function getWorker(): Promise<Worker> {
   return workerPromise
 }
 
+export type OcrMode = 'postcard' | 'full'
+
 /** Focus OCR on the middle card band of a phone screenshot. */
 async function cropForPostcard(image: File | Blob | string): Promise<Blob> {
   if (typeof createImageBitmap === 'undefined') {
-    // Node smoke tests: no canvas crop
     if (typeof image === 'string') {
       const res = await fetch(image)
       return res.blob()
@@ -37,7 +38,6 @@ async function cropForPostcard(image: File | Blob | string): Promise<Blob> {
   const bitmap = await createImageBitmap(blob)
   const w = bitmap.width
   const h = bitmap.height
-  // Center band where Pikmin Bloom postcard card usually sits
   const sx = Math.floor(w * 0.08)
   const sy = Math.floor(h * 0.12)
   const sw = Math.floor(w * 0.84)
@@ -65,19 +65,40 @@ async function cropForPostcard(image: File | Blob | string): Promise<Blob> {
 export async function recognizeText(
   image: File | Blob | string,
   onProgress?: (pct: number) => void,
+  mode: OcrMode = 'postcard',
 ): Promise<string> {
   const worker = await getWorker()
   onProgress?.(15)
   let target: File | Blob | string = image
-  try {
-    target = await cropForPostcard(image)
-  } catch {
-    target = image
+  if (mode === 'postcard') {
+    try {
+      target = await cropForPostcard(image)
+    } catch {
+      target = image
+    }
   }
   onProgress?.(40)
   const result = await worker.recognize(target)
   onProgress?.(100)
   return result.data.text ?? ''
+}
+
+/** OCR several screenshots (postcard crop for first, full frame for rest/maps). */
+export async function recognizeMany(
+  images: Array<File | Blob>,
+  onProgress?: (pct: number) => void,
+): Promise<string[]> {
+  const out: string[] = []
+  const n = images.length
+  for (let i = 0; i < n; i++) {
+    const mode: OcrMode = i === 0 ? 'postcard' : 'full'
+    const text = await recognizeText(images[i]!, (p) => {
+      const base = (i / n) * 100
+      onProgress?.(Math.round(base + p / n))
+    }, mode)
+    out.push(text)
+  }
+  return out
 }
 
 export async function terminateOcr(): Promise<void> {
