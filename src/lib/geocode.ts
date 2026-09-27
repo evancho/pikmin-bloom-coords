@@ -43,6 +43,11 @@ function displayFromPhoton(f: PhotonFeature): string {
   return [p.name, p.street, p.city, p.state, p.country].filter(Boolean).join(', ')
 }
 
+/** Japanese place names stay biased to Japan; Latin names search worldwide. */
+export function queryPrefersJapan(query: string): boolean {
+  return /[\u3040-\u30ff\u3400-\u9fff]/.test(query)
+}
+
 /** Prefer same-origin proxy (dev/preview) so Nominatim gets a User-Agent. */
 function nominatimBase(): string {
   if (typeof window !== 'undefined') return '/api/nominatim'
@@ -57,7 +62,7 @@ async function geocodeNominatim(
   url.searchParams.set('q', query)
   url.searchParams.set('format', 'json')
   url.searchParams.set('limit', '5')
-  url.searchParams.set('countrycodes', 'jp')
+  if (queryPrefersJapan(query)) url.searchParams.set('countrycodes', 'jp')
 
   const headers: HeadersInit = { Accept: 'application/json' }
   if (typeof window === 'undefined') {
@@ -89,7 +94,7 @@ async function geocodePhoton(
   url.searchParams.set('q', query)
   url.searchParams.set('limit', '5')
   url.searchParams.set('lang', 'default')
-  url.searchParams.set('bbox', '122,24,154,46')
+  if (queryPrefersJapan(query)) url.searchParams.set('bbox', '122,24,154,46')
 
   const res = await fetch(url.toString(), { signal })
   if (!res.ok) throw new Error(`Photon ${res.status}`)
@@ -111,15 +116,19 @@ async function geocodeOpenMeteo(
 ): Promise<GeocodeCandidate[]> {
   const url = new URL('https://geocoding-api.open-meteo.com/v1/search')
   url.searchParams.set('name', query)
+  const japanese = queryPrefersJapan(query)
   url.searchParams.set('count', '5')
-  url.searchParams.set('language', 'ja')
+  url.searchParams.set('language', japanese ? 'ja' : 'en')
   url.searchParams.set('format', 'json')
 
   const res = await fetch(url.toString(), { signal })
   if (!res.ok) throw new Error(`Open-Meteo ${res.status}`)
   const data = (await res.json()) as OpenMeteoResult
   return (data.results ?? [])
-    .filter((r) => !r.country || r.country === 'Japan' || r.country === '日本')
+    .filter(
+      (r) =>
+        !japanese || !r.country || r.country === 'Japan' || r.country === '日本',
+    )
     .map((r) => {
       const raw = normalizeJapanish({ lat: r.latitude, lng: r.longitude })
       return {
