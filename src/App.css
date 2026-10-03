@@ -638,6 +638,31 @@ body.has-update-banner {
   font-size: 0.92rem;
 }
 
+.check-update {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-weight: 600;
+}
+
+.eyebrow .check-update .linkish {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--leaf-deep);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+
+.check-update-msg {
+  color: var(--ink-soft);
+  font-weight: 500;
+  font-size: 0.85em;
+}
+
 @media (max-width: 560px) {
   .app {
     width: min(100% - 1rem, 920px);
