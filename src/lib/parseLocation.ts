@@ -91,6 +91,54 @@ function tidyLine(line: string): string {
   )
 }
 
+/**
+ * War-memorial / commemorative inscriptions are common Bloom postcard titles
+ * but geocode to the wrong city (e.g. "Dem Gedenken…" → Berlin). Prefer the
+ * locality line ("In Bad Berka bei der Kirche") or the map town name instead.
+ * Matching is intentionally fuzzy for Tesseract mangling (Gefallanaen, Welkrieg).
+ */
+export function isCommemorativePhrase(line: string): boolean {
+  const t = tidyLine(line)
+  if (
+    /\b(gedenken|gefall\w*|wel+t?krieg|kriegerdenkmal|kriegsopfer|kriegsdenkmal|zum\s+andenken|in\s+memory|fallen\s+sons|war\s+memorial|in\s+memoriam|aux?\s+morts|den\s+toten|ehrendenkmal)\b/i.test(
+      t,
+    )
+  ) {
+    return true
+  }
+  if (
+    /^(Dem|Den|Der|Die|Zum|Zur|Für)\s+/i.test(t) &&
+    /\b(Gedenken|Andenken|Erinnerung|Opfer|S[oöa]hne|Helden|Toten|Stadt)\b/i.test(
+      t,
+    )
+  ) {
+    return true
+  }
+  // Truncated OCR of "Gefallenen Söhne Unserer Stadt"
+  if (
+    /\bunserer?\s+st/i.test(t) &&
+    /\b(gefall|s[oöaä]hne|sohn|helden)/i.test(t)
+  ) {
+    return true
+  }
+  return false
+}
+
+/** "In Bad Berka bei der Kirche" → "Bad Berka" */
+export function extractLocalityFromHint(line: string): string | null {
+  const cleaned = tidyLine(line)
+  const m = cleaned.match(
+    /\bIn\s+([A-ZÀ-Ý][A-Za-zÀ-ÿā-ž'’-]+(?:[\s-][A-ZÀ-Ý][A-Za-zÀ-ÿā-ž'’-]+){0,3})\s+bei\b/,
+  )
+  if (!m) return null
+  const place = tidyLine(m[1]!)
+  return place.length >= 3 ? place : null
+}
+
+export function hasChurchHint(text: string): boolean {
+  return /\b(kirche|church|chapel|kapelle|cathedral|dom)\b/i.test(text)
+}
+
 /** Title Case place names such as "Gemeentehuis Oud-Turnhout". */
 export function looksLikeLatinName(line: string): boolean {
   const t = tidyLine(line).replace(/\.+$/, '')
@@ -99,6 +147,9 @@ export function looksLikeLatinName(line: string): boolean {
   // Ampersand / symbols are almost always OCR noise (Klášter → Kl&ster).
   if (/[&@#%^*_+=<>{}[\]|\\]/.test(t)) return false
   if (isUiChrome(t)) return false
+  if (isCommemorativePhrase(t)) return false
+  // Prepositional captions are locality hints, not the place title itself.
+  if (/^(In|Near|At|By)\s+/i.test(t) && /\sbei\b/i.test(t)) return false
   const compact = t.replace(/\s/g, '')
   const letters = compact.match(/[A-Za-zÀ-ÿĀ-ž]/g) ?? []
   if (letters.length < 4) return false
@@ -131,6 +182,7 @@ export function scoreLatinTitle(line: string, indexInEngLines: number): number {
   score += Math.max(0, 16 - indexInEngLines * 5)
   if (/[.。]$/.test(tidyLine(line))) score -= 5
   if (/[&@#%^*_+=]/.test(line)) score -= 12
+  if (isCommemorativePhrase(t)) score -= 40
   const words = t.split(/[\s-]+/).filter(Boolean)
   if (words.length >= 2 && words.length <= 4) score += 4
   if (
@@ -271,6 +323,9 @@ export function parseLocationFromOcr(rawText: string): ParsedLocation {
     ) ?? null
   const samePass = passes.eng === passes.jpn
   const latinSourceLines = samePass ? lines : engLines
+  const hintLocality =
+    lines.map(extractLocalityFromHint).find((x): x is string => Boolean(x)) ??
+    null
   let latinTitle = pickBestLatinTitle(
     latinSourceLines,
     latinNameCandidates(samePass ? normalized : normalizeOcrText(passes.eng)),
@@ -280,6 +335,12 @@ export function parseLocationFromOcr(rawText: string): ParsedLocation {
       linesFrom(passes.jpn),
       latinNameCandidates(normalizeOcrText(passes.jpn)),
     )
+  }
+  // Caption locality ("In Bad Berka bei der Kirche") beats memorial titles.
+  if (hintLocality) {
+    latinTitle = hintLocality
+  } else if (latinTitle && isCommemorativePhrase(latinTitle)) {
+    latinTitle = null
   }
   // Prefer a clean Latin title from the English OCR pass over Japanese
   // misreads of European names (Konvent Plasy → リーロー). Keep strong
@@ -350,7 +411,19 @@ export function parseLocationFromOcr(rawText: string): ParsedLocation {
   // Latin postcard titles (Europe, etc.) are the search string themselves.
   // Don't append 日本 or a garbled CJK translation ahead of them.
   if (title && looksLikeLatinName(title) && !hasCjk(title)) {
-    for (const q of expandPlaceQueries(title, address)) push(q)
+    const latinAddress =
+      address && /[A-Za-zÀ-ÿ]{3,}/.test(address) ? address : null
+    // Town / landmark name first — "Bad Berka Kirche" alone often hits a street.
+    for (const q of expandPlaceQueries(title, latinAddress)) push(q)
+    // "bei der Kirche" → bias toward the parish church in that town.
+    if (hasChurchHint(normalized)) {
+      push(`Stadtkirche ${title}`)
+      push(`${title} Stadtkirche`)
+      push(`${title} Kirche`)
+      push(`${title} church`)
+      push(`Kirche ${title}`)
+    }
+    if (hintLocality && hintLocality !== title) push(hintLocality)
     // Recover OCR-mangled local names (Kl&ster Plasy → Klaster / Klášter Plasy)
     // as extra queries; they often match OSM landmarks better than "Konvent …".
     for (const line of engLines) {
@@ -410,7 +483,7 @@ export function parseLocationFromOcr(rawText: string): ParsedLocation {
 
 /** Keywords from address/title used to rank geocode hits. */
 export function localityHints(parsed: ParsedLocation): string[] {
-  const blob = [parsed.title, parsed.address, parsed.description]
+  const blob = [parsed.title, parsed.address, parsed.description, ...parsed.searchQueries]
     .filter(Boolean)
     .join(' ')
   const hints: string[] = []
@@ -435,7 +508,17 @@ export function localityHints(parsed: ParsedLocation): string[] {
     if (parts.length >= 2) {
       const last = parts[parts.length - 1]!
       if (last.length >= 3 && !hints.includes(last)) hints.push(last)
+      // Keep full multi-word towns ("Bad Berka") for geocode ranking.
+      if (!hints.includes(parsed.title)) hints.push(parsed.title)
     }
+  }
+  for (const q of parsed.searchQueries) {
+    const fromHint = extractLocalityFromHint(q)
+    if (fromHint && !hints.includes(fromHint)) hints.push(fromHint)
+  }
+  for (const line of (parsed.rawText ?? '').split(/\n/)) {
+    const fromHint = extractLocalityFromHint(line)
+    if (fromHint && !hints.includes(fromHint)) hints.push(fromHint)
   }
   if (parsed.address && /^[A-Za-zÀ-ÿ]/.test(parsed.address)) {
     const token = parsed.address.split(/\s+/)[0]!
@@ -444,9 +527,21 @@ export function localityHints(parsed: ParsedLocation): string[] {
   return hints
 }
 
+function isWeakOrCommemorativeTitle(title: string | null | undefined): boolean {
+  if (!title) return true
+  if (isCommemorativePhrase(title)) return true
+  // Prefer a clean 2-word map town over a long OCR-mangled postcard line.
+  if (title.split(/\s+/).length >= 4 && /[a-z][A-Z]|[A-Z]{2,}[a-z]/.test(title)) {
+    return true
+  }
+  return false
+}
+
 /**
  * Merge postcard + map OCR parses: prefer postcard title/address,
  * keep union of search queries (specific first).
+ * When the postcard title is a commemorative inscription, prefer the map
+ * town name (e.g. Bad Berka) so geocode stays in the right city.
  */
 export function mergeParsedLocations(
   parts: ParsedLocation[],
@@ -462,8 +557,10 @@ export function mergeParsedLocations(
   }
   if (parts.length === 1) return parts[0]!
 
-  // Postcard is parsed first; keep its title when it found one.
-  const title = parts.find((p) => p.title)?.title ?? null
+  const title =
+    parts.find((p) => p.title && !isWeakOrCommemorativeTitle(p.title))?.title ??
+    parts.find((p) => p.title)?.title ??
+    null
 
   const address =
     parts.find((p) => p.address && looksLikeAddress(p.address))?.address ??
@@ -484,10 +581,36 @@ export function mergeParsedLocations(
     searchQueries.push(q)
   }
 
-  // Prefer queries that combine title+address from any part
+  // Prefer the winning title's own queries first (locality / church / landmark).
+  const preferred = parts.find((p) => p.title === title)
+  if (preferred) {
+    for (const q of preferred.searchQueries) push(q)
+  }
+  // Memorial postcards often sit by the parish church; when OCR missed
+  // "bei der Kirche" but raw text still looks commemorative, bias queries.
+  const rawBlob = parts.map((p) => p.rawText).join('\n')
+  if (
+    title &&
+    looksLikeLatinName(title) &&
+    !hasCjk(title) &&
+    (isCommemorativePhrase(rawBlob) ||
+      parts.some((p) => p.title && isCommemorativePhrase(p.title)))
+  ) {
+    push(`Stadtkirche ${title}`)
+    push(`${title} Stadtkirche`)
+    push(`${title} Kirche`)
+    push(`${title} church`)
+  }
   if (title && address) {
-    push(`${title} ${address}`)
-    push(`${title} ${address.replace(/\s+/g, '')}`)
+    // Don't fuse Latin town names with CJK-only phonetic addresses
+    // ("Bad Berka" + "巴特貝爾卡") — that pollutes geocode ranking.
+    const addressIsCjkOnly =
+      hasCjk(address) && !/[A-Za-zÀ-ÿ]{3,}/.test(address)
+    const titleIsLatin = looksLikeLatinName(title) && !hasCjk(title)
+    if (!(titleIsLatin && addressIsCjkOnly)) {
+      push(`${title} ${address}`)
+      push(`${title} ${address.replace(/\s+/g, '')}`)
+    }
   }
   for (const p of parts) {
     for (const q of p.searchQueries) push(q)

@@ -181,6 +181,32 @@ async function cropTitleLine(image: Blob): Promise<Blob> {
   return canvasToPng(canvas)
 }
 
+/** Bottom of the caption often holds "In X bei der Kirche" / distance lines. */
+async function cropFooterLines(image: Blob): Promise<Blob> {
+  if (typeof createImageBitmap === 'undefined' || typeof document === 'undefined') {
+    return image
+  }
+  const bitmap = await createImageBitmap(image)
+  const w = bitmap.width
+  const h = bitmap.height
+  const sy = Math.floor(h * 0.45)
+  const sh = Math.max(24, h - sy)
+  const canvas = document.createElement('canvas')
+  const scale = 2
+  canvas.width = Math.max(1, Math.round(w * scale))
+  canvas.height = Math.max(1, Math.round(sh * scale))
+  const ctx = canvas.getContext('2d')
+  if (!ctx) {
+    bitmap.close()
+    return image
+  }
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  ctx.drawImage(bitmap, 0, sy, w, sh, 0, 0, canvas.width, canvas.height)
+  bitmap.close()
+  return canvasToPng(canvas)
+}
+
 export async function recognizeText(
   image: File | Blob | string,
   onProgress?: (pct: number) => void,
@@ -203,12 +229,13 @@ export async function recognizeText(
     const caption = target instanceof Blob ? target : await imageBlob(target)
     const latinReady = await enhanceForLatinOcr(caption)
     const titleBand = await cropTitleLine(latinReady)
+    const footerBand = await cropFooterLines(latinReady)
 
     const engTitleWorker = await withLang('eng', PSM.SINGLE_LINE, {
       tessedit_char_whitelist: LATIN_WHITELIST,
     })
     const engTitle = await engTitleWorker.recognize(titleBand)
-    onProgress?.(55)
+    onProgress?.(50)
 
     const engFullWorker = await withLang('eng', PSM.SINGLE_BLOCK, {
       // Keep digits for the distance line; still block ampersand noise.
@@ -216,13 +243,19 @@ export async function recognizeText(
         LATIN_WHITELIST + '0123456789,:/：',
     })
     const engFull = await engFullWorker.recognize(latinReady)
-    onProgress?.(75)
+    onProgress?.(65)
+
+    const engFooterWorker = await withLang('eng', PSM.SINGLE_BLOCK, {
+      tessedit_char_whitelist: LATIN_WHITELIST + '0123456789,:/：',
+    })
+    const engFooter = await engFooterWorker.recognize(footerBand)
+    onProgress?.(80)
 
     const jpnWorker = await withLang('jpn', PSM.SINGLE_BLOCK)
     const jpn = await jpnWorker.recognize(caption)
     onProgress?.(100)
 
-    const engText = [engTitle.data.text, engFull.data.text]
+    const engText = [engTitle.data.text, engFull.data.text, engFooter.data.text]
       .filter(Boolean)
       .join('\n')
     // Keep the passes separate so a longer Japanese misread of the same

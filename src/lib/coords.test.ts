@@ -9,6 +9,8 @@ import {
   scoreGeocodeCandidate,
 } from './geocode'
 import {
+  extractLocalityFromHint,
+  isCommemorativePhrase,
   mergeParsedLocations,
   parseLocationFromOcr,
 } from './parseLocation'
@@ -155,6 +157,65 @@ EERE BER
     expect(merged.address).toContain('佐伯市')
     expect(merged.searchQueries.some((q) => q.includes('浅海井'))).toBe(true)
   })
+
+  it('rejects German commemorative inscriptions as titles', () => {
+    expect(isCommemorativePhrase('Dem Gedenken Der Im Weltkrieg')).toBe(true)
+    expect(isCommemorativePhrase('Gefallenen Söhne Unserer Stadt')).toBe(true)
+    expect(isCommemorativePhrase('Gefallanaen SAhne Unserer St')).toBe(true)
+    expect(isCommemorativePhrase('Dem Gedenken Der Im Welkrieg')).toBe(true)
+    expect(isCommemorativePhrase('Konvent Plasy')).toBe(false)
+    expect(extractLocalityFromHint('In Bad Berka bei der Kirche')).toBe(
+      'Bad Berka',
+    )
+  })
+
+  it('prefers Bad Berka locality over a war-memorial postcard title', () => {
+    const postcard = parseLocationFromOcr(`---eng---
+Dem Gedenken Der Im Weltkrieg
+Gefallenen Söhne Unserer Stadt
+距離：9,159,440m 巴特貝爾卡 巴德貝爾卡
+In Bad Berka bei der Kirche
+---jpn---
+距離：9,159,440m 巴特貝爾卡 巴德貝爾卡
+`)
+    expect(postcard.title).toBe('Bad Berka')
+    expect(postcard.title).not.toMatch(/Gedenken|Weltkrieg/i)
+    expect(postcard.searchQueries[0]).toBe('Bad Berka')
+    expect(postcard.searchQueries).toContain('Stadtkirche Bad Berka')
+    expect(postcard.searchQueries).toContain('Bad Berka')
+
+    const map = parseLocationFromOcr(`---eng---
+Bad Berka
+---jpn---
+`)
+    expect(map.title).toBe('Bad Berka')
+
+    const merged = mergeParsedLocations([postcard, map])
+    expect(merged.title).toBe('Bad Berka')
+    expect(merged.searchQueries.some((q) => /Gedenken|Weltkrieg/i.test(q))).toBe(
+      false,
+    )
+  })
+
+  it('uses map town when postcard title is only commemorative', () => {
+    const postcard = parseLocationFromOcr(`---eng---
+Dem Gedenken Der Im Weltkrieg
+Gefallenen Söhne Unserer Stadt
+---jpn---
+`)
+    const map = parseLocationFromOcr(`---eng---
+Bad Berka
+---jpn---
+`)
+    // Postcard alone may have no usable title once memorials are rejected.
+    expect(postcard.title == null || postcard.title === 'Bad Berka').toBe(true)
+    const merged = mergeParsedLocations([
+      { ...postcard, title: 'Dem Gedenken Der Im Weltkrieg' },
+      map,
+    ])
+    expect(merged.title).toBe('Bad Berka')
+    expect(merged.searchQueries).toContain('Stadtkirche Bad Berka')
+  })
 })
 
 describe('caption band', () => {
@@ -180,10 +241,11 @@ describe('caption band', () => {
     }
     const band = captionBandFromRows(rows, 2000)
     expect(band).not.toBeNull()
-    expect(band!.y).toBeGreaterThanOrEqual(900)
+    expect(band!.y).toBeGreaterThanOrEqual(860)
     expect(band!.y).toBeLessThan(980)
+    // Include the full blue panel so smaller address lines are not clipped.
     expect(band!.y + band!.height).toBeGreaterThan(1100)
-    expect(band!.y + band!.height).toBeLessThan(1250)
+    expect(band!.y + band!.height).toBeLessThan(1280)
   })
 })
 
@@ -231,6 +293,16 @@ describe('geocode scope', () => {
     )
     expect(monastery).toBeGreaterThan(board)
     expect(nameMatchScore('Klášter Plasy, Plasy', 'Klášter Plasy')).toBeGreaterThan(5)
+  })
+
+  it('ranks town centers and churches above railway stations', () => {
+    expect(poiTypeScore('place', 'town')).toBeGreaterThan(
+      poiTypeScore('railway', 'station'),
+    )
+    expect(poiTypeScore('amenity', 'place_of_worship')).toBeGreaterThan(
+      poiTypeScore('railway', 'station'),
+    )
+    expect(poiTypeScore('highway', 'service')).toBeLessThan(0)
   })
 })
 
