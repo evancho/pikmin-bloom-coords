@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { InstallGuide } from './components/InstallGuide'
-import { UpdateBanner } from './components/UpdateBanner'
+import { CheckUpdateButton, UpdateBanner } from './components/UpdateBanner'
 import { formatCoords, isValidCoordsText, parseCoordsText } from './lib/coords'
 import { geocodeBest, googleMapsUrl, mapUrl } from './lib/geocode'
 import {
@@ -23,13 +23,11 @@ import {
   saveArchiveItem,
 } from './lib/storage'
 import { exportSyncFile, importSyncFile } from './lib/sync'
+import { APP_BUILD } from './lib/version'
 import type { ArchiveItem, GeocodeCandidate, WorkItem } from './types'
 import { archiveImages } from './types'
 
 type Tab = 'work' | 'archive'
-
-/** App build shown in UI so iOS users can confirm they got the update. */
-export const APP_BUILD = 'v1.2.6-zh'
 
 const emptyWork = (): WorkItem => ({
   imageDataUrls: [],
@@ -403,7 +401,11 @@ export default function App() {
       <UpdateBanner />
       <div className="app">
       <header className="hero">
-        <p className="eyebrow">Pikmin Bloom · {APP_BUILD}</p>
+        <p className="eyebrow">
+          Pikmin Bloom · {APP_BUILD}
+          {' · '}
+          <CheckUpdateButton />
+        </p>
         <h1 className="brand">Bloom Pin</h1>
         <p className="tagline">
           分開選「明信片」與「地圖」兩張截圖（iPhone 適用），合併後找座標並愛心歸檔。

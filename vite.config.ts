@@ -1,14 +1,31 @@
 import react from '@vitejs/plugin-react'
+import { writeFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
 import { VitePWA } from 'vite-plugin-pwa'
 
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const APP_BUILD = 'v1.2.7-update'
+
 /** GitHub Pages: https://evancho.github.io/pikmin-bloom-coords/ */
 const GH_PAGES_BASE = '/pikmin-bloom-coords/'
+
+function writeVersionJson() {
+  return {
+    name: 'write-version-json',
+    closeBundle() {
+      const out = resolve(__dirname, 'dist/version.json')
+      writeFileSync(out, `${JSON.stringify({ build: APP_BUILD }, null, 2)}\n`)
+    },
+  }
+}
 
 export default defineConfig(({ command }) => ({
   base: process.env.VITE_BASE ?? (command === 'serve' ? '/' : GH_PAGES_BASE),
   plugins: [
     react(),
+    writeVersionJson(),
     VitePWA({
       // Prompt only: do not skipWaiting until the user taps 重新載入.
       registerType: 'prompt',
@@ -53,10 +70,11 @@ export default defineConfig(({ command }) => ({
       workbox: {
         // New cache name so installs still on the autoUpdate precache pick up
         // this prompt-banner build once, then wait for the in-app reload.
-        cacheId: 'bloom-pin-v1.2.6',
+        cacheId: 'bloom-pin-v1.2.7',
         skipWaiting: false,
         clientsClaim: true,
         cleanupOutdatedCaches: true,
+        // Keep version.json out of precache so update checks always hit network.
         globPatterns: ['**/*.{js,css,html,svg,png,ico,woff2}'],
         runtimeCaching: [
           {
