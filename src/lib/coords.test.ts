@@ -64,6 +64,27 @@ Gemeentehuis
     expect(parsed.searchQueries.some((q) => q.includes('大分'))).toBe(false)
   })
 
+  it('prefers Konvent Plasy over a mangled Kl&ster subtitle', () => {
+    const parsed = parseLocationFromOcr(`---eng---
+Konvent Plasy
+EERE © 9,575,818mPlasy Plasy
+Kl&ster Plasy.
+---jpn---
+リーロー
+距離：9,575,818m
+`)
+    expect(parsed.title).toBe('Konvent Plasy')
+    expect(parsed.title).not.toContain('&')
+  })
+
+  it('rejects Latin OCR lines that contain ampersand noise', () => {
+    const parsed = parseLocationFromOcr(`---eng---
+Kl&ster Plasy.
+---jpn---
+`)
+    expect(parsed.title).toBeNull()
+  })
+
   it('prefers Konvent Plasy over a Japanese kana misread', () => {
     const parsed = parseLocationFromOcr(`---eng---
 Konvent Plasy

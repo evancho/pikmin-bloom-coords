@@ -8,11 +8,15 @@ export type CaptionRow = {
 }
 
 /**
- * Pikmin Bloom postcard captions sit on a flat blue panel under the photo.
- * Status-bar blue is brighter; the caption panel is darker.
+ * Pikmin Bloom postcard captions sit on a flat blue or purple panel under the photo.
+ * Status-bar chrome is brighter; the caption panel is darker.
  */
 export function isPostcardBlue(r: number, g: number, b: number): boolean {
-  return b > r + 18 && b > 110 && b < 220 && g < b + 8 && r < 180
+  // Classic teal/blue caption
+  if (b > r + 18 && b > 110 && b < 220 && g < b + 8 && r < 180) return true
+  // Night / event purple caption (e.g. Konvent Plasy card)
+  if (b > 90 && r > 35 && g + 25 < b && r < b + 10 && g < 90) return true
+  return false
 }
 
 /**
