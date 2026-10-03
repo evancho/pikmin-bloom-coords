@@ -21,7 +21,9 @@ type PhotonFeature = {
     city?: string
     state?: string
     country?: string
+    osm_key?: string
     osm_value?: string
+    type?: string
   }
 }
 
@@ -30,6 +32,13 @@ type NominatimResult = {
   lat: string
   lon: string
   importance?: number
+  class?: string
+  type?: string
+}
+
+export type RankedGeocodeCandidate = GeocodeCandidate & {
+  className?: string
+  typeName?: string
 }
 
 function displayFromMeteo(
@@ -48,6 +57,119 @@ export function queryPrefersJapan(query: string): boolean {
   return /[\u3040-\u30ff\u3400-\u9fff]/.test(query)
 }
 
+/**
+ * Expand a Latin postcard title into geocoder-friendly landmark queries.
+ * "Konvent Plasy" alone often hits an info board; "Klášter Plasy" / "monastery Plasy" hits the building.
+ */
+export function expandPlaceQueries(
+  title: string,
+  address?: string | null,
+): string[] {
+  const out: string[] = []
+  const push = (q: string | null | undefined) => {
+    const t = (q ?? '').replace(/\s+/g, ' ').trim()
+    if (t.length < 2) return
+    if (!out.includes(t)) out.push(t)
+  }
+
+  const locality = (address ?? '').trim()
+  push(title)
+
+  const m = title.match(
+    /^(Konvent|Convent|Kloster|Klášter|Abbey|Monastery|Castle|Schloss|Palais|Palace|Church|Chapel|Cathedral|Museum|Basilica|Temple|Shrine|Tower|Station|Airport)\s+(.+)$/i,
+  )
+  if (m) {
+    const kind = m[1]!.toLowerCase()
+    const rest = m[2]!.trim()
+    // Landmark synonyms first — these usually match the OSM amenity better
+    // than the raw postcard title (e.g. Konvent → Klášter / monastery).
+    if (/konvent|convent|kloster|klášter|monastery|abbey|basilica/.test(kind)) {
+      push(`Klášter ${rest}`)
+      push(`monastery ${rest}`)
+      push(`abbey ${rest}`)
+      push(`convent ${rest}`)
+      push(`${rest} monastery`)
+      push(`${rest} abbey`)
+      if (locality) {
+        push(`Klášter ${rest} ${locality}`)
+        push(`monastery ${rest} ${locality}`)
+      }
+    } else if (/castle|schloss|palais|palace/.test(kind)) {
+      push(`castle ${rest}`)
+      push(`${rest} castle`)
+      push(`Schloss ${rest}`)
+    } else if (/church|chapel|cathedral|temple|shrine/.test(kind)) {
+      push(`church ${rest}`)
+      push(`${rest} church`)
+    } else if (/museum/.test(kind)) {
+      push(`museum ${rest}`)
+    } else {
+      push(`${kind} ${rest}`)
+      push(`${rest} ${kind}`)
+    }
+  }
+
+  if (locality) {
+    push(`${title} ${locality}`)
+    if (locality.toLowerCase() !== title.toLowerCase()) push(locality)
+  }
+
+  return out
+}
+
+/** Prefer real landmarks over incidental OSM nodes (info boards, etc.). */
+export function poiTypeScore(className?: string, typeName?: string): number {
+  const c = (className ?? '').toLowerCase()
+  const t = (typeName ?? '').toLowerCase()
+  const key = `${c}/${t}`
+  if (
+    /monastery|place_of_worship|cathedral|chapel|church|temple|shrine|castle|palace|museum|attraction|ruins|memorial|monument|tower|bridge|station|airport|university|zoo|theme_park|artwork|viewpoint/.test(
+      key,
+    )
+  ) {
+    return 10
+  }
+  if (c === 'tourism' || c === 'historic') return 7
+  if (c === 'amenity' && !/parking|toilets|bench|waste|atm/.test(t)) return 5
+  if (c === 'building' || c === 'leisure') return 3
+  if (c === 'boundary' || t === 'administrative') return 1
+  if (c === 'information' || t === 'board' || t === 'guidepost') return -8
+  if (c === 'highway' || c === 'shop') return -2
+  return 0
+}
+
+export function nameMatchScore(displayName: string, query: string): number {
+  const d = displayName.toLowerCase()
+  const tokens = query
+    .toLowerCase()
+    .split(/[\s,]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 2)
+  if (!tokens.length) return 0
+  let score = 0
+  const head = d.slice(0, 100)
+  for (const token of tokens) {
+    if (head.includes(token)) score += 3
+    else if (d.includes(token)) score += 1
+  }
+  if (tokens.every((t) => head.includes(t))) score += 4
+  return score
+}
+
+export function scoreGeocodeCandidate(
+  candidate: RankedGeocodeCandidate,
+  query: string,
+  localityHints: string[] = [],
+): number {
+  let score = (candidate.importance ?? 0) * 10
+  score += poiTypeScore(candidate.className, candidate.typeName)
+  score += nameMatchScore(candidate.displayName, query)
+  for (const h of localityHints) {
+    if (candidate.displayName.includes(h)) score += 5
+  }
+  return score
+}
+
 /** Prefer same-origin proxy (dev/preview) so Nominatim gets a User-Agent. */
 function nominatimBase(): string {
   if (typeof window !== 'undefined') return '/api/nominatim'
@@ -57,11 +179,11 @@ function nominatimBase(): string {
 async function geocodeNominatim(
   query: string,
   signal?: AbortSignal,
-): Promise<GeocodeCandidate[]> {
+): Promise<RankedGeocodeCandidate[]> {
   const url = new URL(`${nominatimBase()}/search`)
   url.searchParams.set('q', query)
   url.searchParams.set('format', 'json')
-  url.searchParams.set('limit', '5')
+  url.searchParams.set('limit', '8')
   if (queryPrefersJapan(query)) url.searchParams.set('countrycodes', 'jp')
 
   const headers: HeadersInit = { Accept: 'application/json' }
@@ -82,6 +204,8 @@ async function geocodeNominatim(
       lat: raw.lat,
       lng: raw.lng,
       importance: row.importance,
+      className: row.class,
+      typeName: row.type,
     }
   })
 }
@@ -89,10 +213,10 @@ async function geocodeNominatim(
 async function geocodePhoton(
   query: string,
   signal?: AbortSignal,
-): Promise<GeocodeCandidate[]> {
+): Promise<RankedGeocodeCandidate[]> {
   const url = new URL('https://photon.komoot.io/api/')
   url.searchParams.set('q', query)
-  url.searchParams.set('limit', '5')
+  url.searchParams.set('limit', '8')
   url.searchParams.set('lang', 'default')
   if (queryPrefersJapan(query)) url.searchParams.set('bbox', '122,24,154,46')
 
@@ -102,10 +226,13 @@ async function geocodePhoton(
   return (data.features ?? []).map((f) => {
     const [lng, lat] = f.geometry.coordinates
     const raw = normalizeJapanish({ lat, lng })
+    const p = f.properties
     return {
       displayName: displayFromPhoton(f) || query,
       lat: raw.lat,
       lng: raw.lng,
+      className: p.osm_key,
+      typeName: p.osm_value ?? p.type,
     }
   })
 }
@@ -113,7 +240,7 @@ async function geocodePhoton(
 async function geocodeOpenMeteo(
   query: string,
   signal?: AbortSignal,
-): Promise<GeocodeCandidate[]> {
+): Promise<RankedGeocodeCandidate[]> {
   const url = new URL('https://geocoding-api.open-meteo.com/v1/search')
   url.searchParams.set('name', query)
   const japanese = queryPrefersJapan(query)
@@ -136,6 +263,8 @@ async function geocodeOpenMeteo(
         lat: raw.lat,
         lng: raw.lng,
         importance: r.rank,
+        className: 'place',
+        typeName: 'locality',
       }
     })
 }
@@ -143,17 +272,39 @@ async function geocodeOpenMeteo(
 export async function geocodeQuery(
   query: string,
   signal?: AbortSignal,
-): Promise<GeocodeCandidate[]> {
+): Promise<RankedGeocodeCandidate[]> {
   const providers = [geocodeNominatim, geocodePhoton, geocodeOpenMeteo]
+  // Worldwide Latin names: merge providers so a weak Nominatim info-board
+  // hit does not hide a better Photon/OSM monastery result from another query.
+  // Japanese stays first-success to keep the old low-latency path.
+  if (queryPrefersJapan(query)) {
+    for (const provider of providers) {
+      try {
+        const hits = await provider(query, signal)
+        if (hits.length) return hits
+      } catch (e) {
+        if (signal?.aborted) throw e
+      }
+    }
+    return []
+  }
+
+  const merged: RankedGeocodeCandidate[] = []
+  const seen = new Set<string>()
   for (const provider of providers) {
     try {
       const hits = await provider(query, signal)
-      if (hits.length) return hits
+      for (const h of hits) {
+        const key = `${formatCoords(h.lat, h.lng)}|${h.displayName}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        merged.push(h)
+      }
     } catch (e) {
       if (signal?.aborted) throw e
     }
   }
-  return []
+  return merged
 }
 
 export async function geocodeBest(
@@ -162,49 +313,101 @@ export async function geocodeBest(
   localityHints: string[] = [],
 ): Promise<{ candidates: GeocodeCandidate[]; usedQuery: string | null }> {
   const seen = new Set<string>()
-  const all: GeocodeCandidate[] = []
+  const all: RankedGeocodeCandidate[] = []
   let usedQuery: string | null = null
+  const cleanedQueries = queries.map((q) => q.trim()).filter(Boolean)
 
-  for (const q of queries) {
-    if (!q.trim()) continue
+  for (const q of cleanedQueries) {
     try {
       const hits = await geocodeQuery(q, signal)
       if (hits.length && !usedQuery) usedQuery = q
       for (const h of hits) {
         const key = formatCoords(h.lat, h.lng)
-        if (seen.has(key)) continue
+        if (seen.has(key)) {
+          const existing = all.find((c) => formatCoords(c.lat, c.lng) === key)
+          if (
+            existing &&
+            scoreAgainstQueries(h, cleanedQueries, localityHints) >
+              scoreAgainstQueries(existing, cleanedQueries, localityHints)
+          ) {
+            existing.displayName = h.displayName
+            existing.importance = h.importance
+            existing.className = h.className
+            existing.typeName = h.typeName
+          }
+          continue
+        }
         seen.add(key)
         all.push(h)
       }
-      // Keep searching until we have a locality-matching hit or enough options
+      const hasLandmark = all.some(
+        (c) => poiTypeScore(c.className, c.typeName) >= 7,
+      )
+      if (hasLandmark) {
+        usedQuery =
+          cleanedQueries.find((q) =>
+            all.some(
+              (c) =>
+                poiTypeScore(c.className, c.typeName) >= 7 &&
+                nameMatchScore(c.displayName, q) >= 4,
+            ),
+          ) ?? usedQuery
+        break
+      }
       const hasLocal = all.some((c) =>
         localityHints.some((h) => c.displayName.includes(h)),
       )
-      if (hasLocal && all.length >= 2) break
-      if (all.length >= 8) break
+      // Japanese path: stop once we have enough locality hits.
+      if (queryPrefersJapan(q) && hasLocal && all.length >= 2) break
+      if (all.length >= 14) break
     } catch (err) {
       if (signal?.aborted) throw err
     }
   }
 
-  all.sort((a, b) => {
-    const score = (c: GeocodeCandidate) => {
-      let s = c.importance ?? 0
-      for (const h of localityHints) {
-        if (c.displayName.includes(h)) s += 5
-      }
-      // Prefer Kyushu / Oita ballpark when hints mention 佐伯/大分
-      if (
-        localityHints.some((h) => h === '佐伯' || h === '大分' || h === '浅海井')
-      ) {
-        if (c.lat > 32.5 && c.lat < 34 && c.lng > 131 && c.lng < 132.5) s += 3
-      }
-      return s
-    }
-    return score(b) - score(a)
-  })
+  all.sort(
+    (a, b) =>
+      scoreAgainstQueries(b, cleanedQueries, localityHints) -
+      scoreAgainstQueries(a, cleanedQueries, localityHints),
+  )
 
-  return { candidates: all.slice(0, 6), usedQuery }
+  // Prefer a landmark-bearing query as the reported usedQuery.
+  const top = all[0]
+  if (top && poiTypeScore(top.className, top.typeName) >= 7) {
+    usedQuery =
+      cleanedQueries.find((q) => nameMatchScore(top.displayName, q) >= 4) ??
+      usedQuery
+  }
+
+  return {
+    candidates: all.slice(0, 6).map(({ className: _c, typeName: _t, ...rest }) => rest),
+    usedQuery,
+  }
+}
+
+function scoreAgainstQueries(
+  candidate: RankedGeocodeCandidate,
+  queries: string[],
+  localityHints: string[],
+): number {
+  let best = scoreGeocodeCandidate(candidate, queries[0] ?? '', localityHints)
+  for (const q of queries) {
+    best = Math.max(best, scoreGeocodeCandidate(candidate, q, localityHints))
+  }
+  // Prefer Kyushu / Oita ballpark when hints mention 佐伯/大分
+  if (
+    localityHints.some((h) => h === '佐伯' || h === '大分' || h === '浅海井')
+  ) {
+    if (
+      candidate.lat > 32.5 &&
+      candidate.lat < 34 &&
+      candidate.lng > 131 &&
+      candidate.lng < 132.5
+    ) {
+      best += 3
+    }
+  }
+  return best
 }
 
 export function mapUrl(lat: number, lng: number): string {
