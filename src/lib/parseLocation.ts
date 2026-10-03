@@ -401,13 +401,18 @@ export function parseLocationFromOcr(rawText: string): ParsedLocation {
   // Latin postcard titles (Europe, etc.) are the search string themselves.
   // Don't append 日本 or a garbled CJK translation ahead of them.
   if (title && looksLikeLatinName(title) && !hasCjk(title)) {
-    // "bei der Kirche" → bias geocode toward the church / memorial in town.
+    const latinAddress =
+      address && /[A-Za-zÀ-ÿ]{3,}/.test(address) ? address : null
+    // Town / landmark name first — "Bad Berka Kirche" alone often hits a street.
+    for (const q of expandPlaceQueries(title, latinAddress)) push(q)
+    // "bei der Kirche" → bias toward the parish church in that town.
     if (hasChurchHint(normalized)) {
+      push(`Stadtkirche ${title}`)
+      push(`${title} Stadtkirche`)
       push(`${title} Kirche`)
       push(`${title} church`)
       push(`Kirche ${title}`)
     }
-    for (const q of expandPlaceQueries(title, address)) push(q)
     if (hintLocality && hintLocality !== title) push(hintLocality)
     // Recover OCR-mangled local names (Kl&ster Plasy → Klaster / Klášter Plasy)
     // as extra queries; they often match OSM landmarks better than "Konvent …".
@@ -561,15 +566,21 @@ export function mergeParsedLocations(
     searchQueries.push(q)
   }
 
-  // Prefer queries that combine title+address from any part
-  if (title && address) {
-    push(`${title} ${address}`)
-    push(`${title} ${address.replace(/\s+/g, '')}`)
-  }
-  // Prefer the winning title's own queries first (locality / church), then the rest.
+  // Prefer the winning title's own queries first (locality / church / landmark).
   const preferred = parts.find((p) => p.title === title)
   if (preferred) {
     for (const q of preferred.searchQueries) push(q)
+  }
+  if (title && address) {
+    // Don't fuse Latin town names with CJK-only phonetic addresses
+    // ("Bad Berka" + "巴特貝爾卡") — that pollutes geocode ranking.
+    const addressIsCjkOnly =
+      hasCjk(address) && !/[A-Za-zÀ-ÿ]{3,}/.test(address)
+    const titleIsLatin = looksLikeLatinName(title) && !hasCjk(title)
+    if (!(titleIsLatin && addressIsCjkOnly)) {
+      push(`${title} ${address}`)
+      push(`${title} ${address.replace(/\s+/g, '')}`)
+    }
   }
   for (const p of parts) {
     for (const q of p.searchQueries) push(q)

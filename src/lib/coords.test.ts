@@ -178,7 +178,8 @@ In Bad Berka bei der Kirche
 `)
     expect(postcard.title).toBe('Bad Berka')
     expect(postcard.title).not.toMatch(/Gedenken|Weltkrieg/i)
-    expect(postcard.searchQueries[0]).toMatch(/Bad Berka.*Kirche|Kirche.*Bad Berka/i)
+    expect(postcard.searchQueries[0]).toBe('Bad Berka')
+    expect(postcard.searchQueries).toContain('Stadtkirche Bad Berka')
     expect(postcard.searchQueries).toContain('Bad Berka')
 
     const map = parseLocationFromOcr(`---eng---
@@ -288,6 +289,16 @@ describe('geocode scope', () => {
     )
     expect(monastery).toBeGreaterThan(board)
     expect(nameMatchScore('Klášter Plasy, Plasy', 'Klášter Plasy')).toBeGreaterThan(5)
+  })
+
+  it('ranks town centers and churches above railway stations', () => {
+    expect(poiTypeScore('place', 'town')).toBeGreaterThan(
+      poiTypeScore('railway', 'station'),
+    )
+    expect(poiTypeScore('amenity', 'place_of_worship')).toBeGreaterThan(
+      poiTypeScore('railway', 'station'),
+    )
+    expect(poiTypeScore('highway', 'service')).toBeLessThan(0)
   })
 })
 

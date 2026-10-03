@@ -123,18 +123,24 @@ export function poiTypeScore(className?: string, typeName?: string): number {
   const t = (typeName ?? '').toLowerCase()
   const key = `${c}/${t}`
   if (
-    /monastery|place_of_worship|cathedral|chapel|church|temple|shrine|castle|palace|museum|attraction|ruins|memorial|monument|tower|bridge|station|airport|university|zoo|theme_park|artwork|viewpoint/.test(
+    /monastery|place_of_worship|cathedral|chapel|church|temple|shrine|castle|palace|museum|attraction|ruins|memorial|monument|tower|bridge|airport|university|zoo|theme_park|artwork|viewpoint/.test(
       key,
     )
   ) {
     return 10
   }
   if (c === 'tourism' || c === 'historic') return 7
+  if (c === 'place' && /city|town|village|hamlet|municipality|suburb|neighbourhood/.test(t))
+    return 6
+  // Train stations named after the town often outrank the town center; keep mild.
+  if ((c === 'railway' || c === 'public_transport') && /station|halt|stop/.test(t))
+    return 2
   if (c === 'amenity' && !/parking|toilets|bench|waste|atm/.test(t)) return 5
   if (c === 'building' || c === 'leisure') return 3
   if (c === 'boundary' || t === 'administrative') return 1
   if (c === 'information' || t === 'board' || t === 'guidepost') return -8
-  if (c === 'highway' || c === 'shop') return -2
+  // Street names containing "Kirche" must not beat the actual church / town.
+  if (c === 'highway' || c === 'shop') return -6
   return 0
 }
 
