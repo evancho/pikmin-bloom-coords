@@ -47,11 +47,31 @@ function isUiChrome(s: string): boolean {
 
 function extractAddressFromDistanceLine(line: string): string | null {
   const m = line.match(
-    /(?:距離|距离|Distance)\s*[:：]?\s*[\d,，.]+\s*m?\s*(.+)$/i,
+    /(?:距離|距离|Distance)\s*[:：]?\s*[\d,，.?]+\s*m?\s*(.+)$/i,
   )
-  if (!m) return null
-  const rest = cleanLine(m[1])
-  return rest.length >= 2 ? rest : null
+  if (!m) {
+    // English OCR often mangles 距離 into noise but keeps "123m Place".
+    const eng = line.match(
+      /(?:^|[^\d])(?:[\d?]{1,3}[,，]?){1,4}\d{2,}\s*m\s*([A-Za-zÀ-ÿ].+)$/i,
+    )
+    if (!eng) return null
+    return tidyAddressFragment(eng[1])
+  }
+  return tidyAddressFragment(m[1])
+}
+
+function tidyAddressFragment(raw: string | undefined): string | null {
+  if (!raw) return null
+  let rest = cleanLine(
+    raw
+      .replace(/^[?\d,.\s]*m\s*/i, '')
+      .replace(/^(?:距離|距离|Distance)\s*[:：]?\s*[\d,，.?]+\s*m?/i, ''),
+  )
+  // Drop pure OCR junk ("?.082,818m") with no real place tokens.
+  if (!rest) return null
+  if (/^[\d?,.\sm]+$/i.test(rest)) return null
+  if (rest.length < 2) return null
+  return rest
 }
 
 const LATIN_NAME =
@@ -276,8 +296,8 @@ export function parseLocationFromOcr(rawText: string): ParsedLocation {
     address = cjkLines.find((l) => looksLikeAddress(l)) ?? null
   }
   if (address) {
-    address = cleanLine(
-      address.replace(/^(?:距離|距离|Distance)\s*[:：]?\s*[\d,，.]+\s*m?/i, ''),
+    address = tidyAddressFragment(
+      address.replace(/^(?:距離|距离|Distance)\s*[:：]?\s*[\d,，.?]+\s*m?/i, ''),
     )
   }
 
