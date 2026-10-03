@@ -43,6 +43,29 @@ async function withLang(
 
 export type OcrMode = 'postcard' | 'full'
 
+/** User-selectable OCR language bias. Auto still runs eng+jpn. */
+export type OcrLangPref = 'auto' | 'ja' | 'en'
+
+export const OCR_LANG_STORAGE_KEY = 'bloom-pin-ocr-lang'
+
+export function loadOcrLangPref(): OcrLangPref {
+  try {
+    const v = localStorage.getItem(OCR_LANG_STORAGE_KEY)
+    if (v === 'ja' || v === 'en' || v === 'auto') return v
+  } catch {
+    /* ignore */
+  }
+  return 'auto'
+}
+
+export function saveOcrLangPref(pref: OcrLangPref): void {
+  try {
+    localStorage.setItem(OCR_LANG_STORAGE_KEY, pref)
+  } catch {
+    /* ignore */
+  }
+}
+
 async function imageBlob(image: File | Blob | string): Promise<Blob> {
   if (typeof image === 'string') {
     const res = await fetch(image)
@@ -211,6 +234,7 @@ export async function recognizeText(
   image: File | Blob | string,
   onProgress?: (pct: number) => void,
   mode: OcrMode = 'postcard',
+  langPref: OcrLangPref = 'auto',
 ): Promise<string> {
   onProgress?.(15)
   let target: Blob | File | string = image
@@ -227,43 +251,64 @@ export async function recognizeText(
   // crop, read Japanese and English separately and let the parser choose.
   if (mode === 'postcard') {
     const caption = target instanceof Blob ? target : await imageBlob(target)
-    const latinReady = await enhanceForLatinOcr(caption)
-    const titleBand = await cropTitleLine(latinReady)
-    const footerBand = await cropFooterLines(latinReady)
+    // ja: still run eng so distance lines like "Kyoto Fushimi Ward" survive;
+    // the parser (langPref) decides whether Latin titles may beat Japanese.
+    const runEng = true
+    const runJpn = langPref !== 'en'
+    let engText = ''
+    let jpnText = ''
 
-    const engTitleWorker = await withLang('eng', PSM.SINGLE_LINE, {
-      tessedit_char_whitelist: LATIN_WHITELIST,
-    })
-    const engTitle = await engTitleWorker.recognize(titleBand)
-    onProgress?.(50)
+    if (runEng) {
+      const latinReady = await enhanceForLatinOcr(caption)
+      const titleBand = await cropTitleLine(latinReady)
+      const footerBand = await cropFooterLines(latinReady)
 
-    const engFullWorker = await withLang('eng', PSM.SINGLE_BLOCK, {
-      // Keep digits for the distance line; still block ampersand noise.
-      tessedit_char_whitelist:
-        LATIN_WHITELIST + '0123456789,:/：',
-    })
-    const engFull = await engFullWorker.recognize(latinReady)
-    onProgress?.(65)
+      // English-only / auto: OCR the bold title line. Japanese-priority skips
+      // this pass — eng single-line often invents junk like "an vere…".
+      let engTitleText = ''
+      if (langPref !== 'ja') {
+        const engTitleWorker = await withLang('eng', PSM.SINGLE_LINE, {
+          tessedit_char_whitelist: LATIN_WHITELIST,
+        })
+        const engTitle = await engTitleWorker.recognize(titleBand)
+        engTitleText = engTitle.data.text ?? ''
+      }
+      onProgress?.(runJpn ? 45 : 55)
 
-    const engFooterWorker = await withLang('eng', PSM.SINGLE_BLOCK, {
-      tessedit_char_whitelist: LATIN_WHITELIST + '0123456789,:/：',
-    })
-    const engFooter = await engFooterWorker.recognize(footerBand)
-    onProgress?.(80)
+      const engFullWorker = await withLang('eng', PSM.SINGLE_BLOCK, {
+        // Keep digits for the distance line; still block ampersand noise.
+        tessedit_char_whitelist: LATIN_WHITELIST + '0123456789,:/：',
+      })
+      const engFull = await engFullWorker.recognize(latinReady)
+      onProgress?.(runJpn ? 60 : 80)
 
-    const jpnWorker = await withLang('jpn', PSM.SINGLE_BLOCK)
-    const jpn = await jpnWorker.recognize(caption)
+      const engFooterWorker = await withLang('eng', PSM.SINGLE_BLOCK, {
+        tessedit_char_whitelist: LATIN_WHITELIST + '0123456789,:/：',
+      })
+      const engFooter = await engFooterWorker.recognize(footerBand)
+      engText = [engTitleText, engFull.data.text, engFooter.data.text]
+        .filter(Boolean)
+        .join('\n')
+    }
+
+    if (runJpn) {
+      onProgress?.(runEng ? 80 : 55)
+      const jpnWorker = await withLang('jpn', PSM.SINGLE_BLOCK)
+      const jpn = await jpnWorker.recognize(caption)
+      jpnText = jpn.data.text ?? ''
+    }
+
+    if (langPref === 'en' && !jpnText) {
+      jpnText = engText
+    }
+
     onProgress?.(100)
-
-    const engText = [engTitle.data.text, engFull.data.text, engFooter.data.text]
-      .filter(Boolean)
-      .join('\n')
-    // Keep the passes separate so a longer Japanese misread of the same
-    // Latin title cannot outrank the English pass.
-    return `---eng---\n${engText}\n---jpn---\n${jpn.data.text ?? ''}`
+    return `---eng---\n${engText}\n---jpn---\n${jpnText}`
   }
 
-  const worker = await withLang('jpn+eng', PSM.AUTO)
+  const mapLangs =
+    langPref === 'ja' ? 'jpn' : langPref === 'en' ? 'eng' : 'jpn+eng'
+  const worker = await withLang(mapLangs, PSM.AUTO)
   const result = await worker.recognize(target)
   onProgress?.(100)
   return result.data.text ?? ''
@@ -273,15 +318,21 @@ export async function recognizeText(
 export async function recognizeMany(
   images: Array<File | Blob>,
   onProgress?: (pct: number) => void,
+  langPref: OcrLangPref = 'auto',
 ): Promise<string[]> {
   const out: string[] = []
   const n = images.length
   for (let i = 0; i < n; i++) {
     const mode: OcrMode = i === 0 ? 'postcard' : 'full'
-    const text = await recognizeText(images[i]!, (p) => {
-      const base = (i / n) * 100
-      onProgress?.(Math.round(base + p / n))
-    }, mode)
+    const text = await recognizeText(
+      images[i]!,
+      (p) => {
+        const base = (i / n) * 100
+        onProgress?.(Math.round(base + p / n))
+      },
+      mode,
+      langPref,
+    )
     out.push(text)
   }
   return out

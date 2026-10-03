@@ -114,6 +114,39 @@
   line-height: 1.45;
 }
 
+.ocr-lang {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin: 0 0 0.9rem;
+  font-size: 0.9rem;
+  color: var(--ink-soft);
+}
+
+.ocr-lang-label {
+  flex: 0 0 auto;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.ocr-lang select {
+  flex: 1 1 auto;
+  min-width: 0;
+  appearance: none;
+  border: 1px solid rgba(47, 107, 79, 0.35);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.75)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%232f6b4f' d='M1 1l5 5 5-5'/%3E%3C/svg%3E")
+    no-repeat right 0.75rem center;
+  padding: 0.55rem 2rem 0.55rem 0.75rem;
+  color: var(--ink);
+  font: inherit;
+}
+
+.ocr-lang select:disabled {
+  opacity: 0.6;
+}
+
 .slot-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
