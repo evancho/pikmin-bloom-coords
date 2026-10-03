@@ -11,6 +11,7 @@ import {
 import {
   extractLocalityFromHint,
   isCommemorativePhrase,
+  isWeakLatinOcrTitle,
   mergeParsedLocations,
   parseLocationFromOcr,
 } from './parseLocation'
@@ -303,6 +304,51 @@ describe('geocode scope', () => {
       poiTypeScore('railway', 'station'),
     )
     expect(poiTypeScore('highway', 'service')).toBeLessThan(0)
+  })
+})
+
+describe('japanese postcard titles', () => {
+  it('rejects weak English OCR junk like an vere Fushimi Ward', () => {
+    expect(isWeakLatinOcrTitle('an vere Fushimi Ward')).toBe(true)
+    expect(isWeakLatinOcrTitle('Kyoto Fushimi Ward')).toBe(false)
+    expect(isWeakLatinOcrTitle('Konvent Plasy')).toBe(false)
+  })
+
+  it('prefers 喫茶店リゲル over eng OCR ward junk in auto mode', () => {
+    const parsed = parseLocationFromOcr(`---eng---
+an vere Fushimi Ward
+距離：8,067,158m Kyoto Fushimi Ward
+---jpn---
+喫茶店リゲル
+距離：8,067,158m Kyoto Fushimi Ward
+昔からある純喫茶。
+`)
+    expect(parsed.title).toBe('喫茶店リゲル')
+    expect(parsed.address).toMatch(/Fushimi|Kyoto/i)
+  })
+
+  it('ja preference keeps Japanese titles even without shop keywords', () => {
+    const parsed = parseLocationFromOcr(
+      `---eng---
+Kyoto Somewhere
+---jpn---
+青い屋根の家
+`,
+      'ja',
+    )
+    expect(parsed.title).toBe('青い屋根の家')
+  })
+
+  it('en preference keeps Latin landmark titles', () => {
+    const parsed = parseLocationFromOcr(
+      `---eng---
+Konvent Plasy
+---jpn---
+リーロー
+`,
+      'en',
+    )
+    expect(parsed.title).toBe('Konvent Plasy')
   })
 })
 

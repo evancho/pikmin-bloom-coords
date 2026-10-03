@@ -148,6 +148,7 @@ export function looksLikeLatinName(line: string): boolean {
   if (/[&@#%^*_+=<>{}[\]|\\]/.test(t)) return false
   if (isUiChrome(t)) return false
   if (isCommemorativePhrase(t)) return false
+  if (isWeakLatinOcrTitle(t)) return false
   // Prepositional captions are locality hints, not the place title itself.
   if (/^(In|Near|At|By)\s+/i.test(t) && /\sbei\b/i.test(t)) return false
   const compact = t.replace(/\s/g, '')
@@ -159,6 +160,13 @@ export function looksLikeLatinName(line: string): boolean {
   // Bloom postcard titles are almost always multi-word ("Konvent Plasy").
   // A lone leftover token after OCR noise ("Plasy" from "Kl&ster Plasy") is not enough.
   if (words.length < 2 || words.length > 6) return false
+  // Administrative ward lines are addresses, not postcard titles.
+  if (
+    /\b(Ward|District|Prefecture)\b/i.test(t) &&
+    !/huis|house|castle|church|kirche|museum|plaza|park/i.test(t)
+  ) {
+    return false
+  }
   const shouting = words.filter(
     (w) => w.length > 2 && w === w.toUpperCase() && /[A-Z]/.test(w),
   )
@@ -234,7 +242,23 @@ function isMostlyKana(line: string): boolean {
 }
 
 function isStrongJapanesePlace(line: string): boolean {
-  return /神社|寺|駅|站|公園|滝|瀧|城|橋|港|山|湖|館|堂|宮|院|塔/.test(line)
+  return /神社|寺|駅|站|公園|滝|瀧|城|橋|港|山|湖|館|堂|宮|院|塔|喫茶|カフェ|食堂|レストラン|酒店|温泉|市場|美術館|博物館|店舗|商店/.test(
+    line,
+  )
+}
+
+/** Weak eng OCR leftovers like "an vere Fushimi Ward". */
+export function isWeakLatinOcrTitle(line: string): boolean {
+  const t = tidyLine(line)
+  if (/^[a-z]{1,4}\b/.test(t)) return true
+  if (/\b(an|vere|the|der|die|das)\b/i.test(t) && !/^(The|Der|Die)\s/.test(t)) {
+    // "an vere…" / mid-line article junk — not a real place title.
+    if (/^[a-z]/.test(t) || /\ban\s+vere\b/i.test(t)) return true
+  }
+  const words = t.split(/\s+/).filter(Boolean)
+  const lowerLead = words.filter((w) => /^[a-z]/.test(w)).length
+  if (words.length >= 3 && lowerLead >= 2) return true
+  return false
 }
 
 function scoreTitle(line: string): number {
@@ -285,7 +309,12 @@ function linesFrom(raw: string): string[] {
     .filter((l) => l.length > 0 && l !== '---eng---' && l !== '---jpn---')
 }
 
-export function parseLocationFromOcr(rawText: string): ParsedLocation {
+export type ParseLangPref = 'auto' | 'ja' | 'en'
+
+export function parseLocationFromOcr(
+  rawText: string,
+  langPref: ParseLangPref = 'auto',
+): ParsedLocation {
   const passes = splitOcrPasses(rawText)
   const normalized = normalizeOcrText(`${passes.eng}\n${passes.jpn}`)
   const lines = linesFrom(`${passes.eng}\n${passes.jpn}`)
@@ -339,26 +368,38 @@ export function parseLocationFromOcr(rawText: string): ParsedLocation {
   // Caption locality ("In Bad Berka bei der Kirche") beats memorial titles.
   if (hintLocality) {
     latinTitle = hintLocality
-  } else if (latinTitle && isCommemorativePhrase(latinTitle)) {
+  } else if (
+    latinTitle &&
+    (isCommemorativePhrase(latinTitle) || isWeakLatinOcrTitle(latinTitle))
+  ) {
     latinTitle = null
   }
-  // Prefer a clean Latin title from the English OCR pass over Japanese
-  // misreads of European names (Konvent Plasy → リーロー). Keep strong
-  // Japanese place titles (神社／寺／公園…) when those are present.
-  if (latinTitle && !(cjkTitle && isStrongJapanesePlace(cjkTitle))) {
+
+  const softCjk =
+    ranked.find(
+      (l) =>
+        scoreTitle(l) > 0 &&
+        l.length <= 24 &&
+        !isKanaNoise(l) &&
+        !isMostlyKana(l) &&
+        /[一-龯]/.test(l),
+    ) ?? null
+
+  // langPref=ja → always prefer Japanese titles when present.
+  // auto → Latin for Europe, but keep strong JP places (神社／喫茶店…).
+  // en → Latin first.
+  if (langPref === 'ja') {
+    title = cjkTitle ?? softCjk ?? latinTitle
+  } else if (langPref === 'en') {
+    title = latinTitle ?? cjkTitle ?? softCjk
+  } else if (latinTitle && !(cjkTitle && isStrongJapanesePlace(cjkTitle))) {
+    // Prefer a clean Latin title from the English OCR pass over Japanese
+    // misreads of European names (Konvent Plasy → リーロー).
     title = latinTitle
   } else if (cjkTitle) {
     title = cjkTitle
   } else {
-    title =
-      ranked.find(
-        (l) =>
-          scoreTitle(l) > 0 &&
-          l.length <= 24 &&
-          !isKanaNoise(l) &&
-          !isMostlyKana(l) &&
-          /[一-龯]/.test(l),
-      ) ?? null
+    title = softCjk
   }
 
   if (!address) {

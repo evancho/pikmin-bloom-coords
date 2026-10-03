@@ -4,7 +4,12 @@ import { InstallGuide } from './components/InstallGuide'
 import { UpdateBanner } from './components/UpdateBanner'
 import { formatCoords, isValidCoordsText, parseCoordsText } from './lib/coords'
 import { geocodeBest, googleMapsUrl, mapUrl } from './lib/geocode'
-import { recognizeMany } from './lib/ocr'
+import {
+  loadOcrLangPref,
+  recognizeMany,
+  saveOcrLangPref,
+  type OcrLangPref,
+} from './lib/ocr'
 import {
   localityHints,
   mergeParsedLocations,
@@ -24,7 +29,7 @@ import { archiveImages } from './types'
 type Tab = 'work' | 'archive'
 
 /** App build shown in UI so iOS users can confirm they got the update. */
-export const APP_BUILD = 'v1.2.4-locality'
+export const APP_BUILD = 'v1.2.5-lang'
 
 const emptyWork = (): WorkItem => ({
   imageDataUrls: [],
@@ -58,10 +63,12 @@ export default function App() {
   const [heartBurst, setHeartBurst] = useState(false)
   const [syncMessage, setSyncMessage] = useState('')
   const [slots, setSlots] = useState<ShotSlots>({ postcard: null, map: null })
+  const [ocrLang, setOcrLang] = useState<OcrLangPref>(() => loadOcrLangPref())
   const abortRef = useRef<AbortController | null>(null)
   const postcardInputRef = useRef<HTMLInputElement>(null)
   const mapInputRef = useRef<HTMLInputElement>(null)
   const slotsRef = useRef<ShotSlots>({ postcard: null, map: null })
+  const ocrLangRef = useRef<OcrLangPref>(ocrLang)
 
   const refreshArchive = useCallback(async () => {
     setArchive(await listArchive())
@@ -75,6 +82,7 @@ export default function App() {
     const files = slotsToFiles(nextSlots)
     slotsRef.current = nextSlots
     setSlots(nextSlots)
+    const lang = ocrLangRef.current
 
     if (!files.length) {
       abortRef.current?.abort()
@@ -91,6 +99,8 @@ export default function App() {
     setCopied(false)
 
     const dataUrls = await Promise.all(files.map((f) => fileToDataUrl(f)))
+    const langLabel =
+      lang === 'ja' ? '日文優先' : lang === 'en' ? '英文優先' : '自動'
     // Keep UI aligned with slots: postcard then map (empty slot omitted from urls list
     // but we also store parallel labeled previews via slotPreview below)
     setWork({
@@ -99,17 +109,17 @@ export default function App() {
       status: 'ocr',
       statusMessage:
         files.length > 1
-          ? '正在辨識明信片＋地圖兩張截圖…'
+          ? `正在辨識明信片＋地圖（${langLabel}）…`
           : nextSlots.map
-            ? '正在辨識地圖截圖…'
-            : '正在辨識明信片截圖…',
+            ? `正在辨識地圖截圖（${langLabel}）…`
+            : `正在辨識明信片截圖（${langLabel}）…`,
     })
 
     try {
-      const texts = await recognizeMany(files)
+      const texts = await recognizeMany(files, undefined, lang)
       if (ac.signal.aborted) return
 
-      const parts = texts.map((t) => parseLocationFromOcr(t))
+      const parts = texts.map((t) => parseLocationFromOcr(t, lang))
       const parsed = mergeParsedLocations(parts)
       setWork((w) => ({
         ...w,
@@ -157,6 +167,18 @@ export default function App() {
     (which: keyof ShotSlots, file: File | null) => {
       const next = { ...slotsRef.current, [which]: file }
       void runPipeline(next)
+    },
+    [runPipeline],
+  )
+
+  const onOcrLangChange = useCallback(
+    (next: OcrLangPref) => {
+      ocrLangRef.current = next
+      setOcrLang(next)
+      saveOcrLangPref(next)
+      if (slotsRef.current.postcard || slotsRef.current.map) {
+        void runPipeline(slotsRef.current)
+      }
     },
     [runPipeline],
   )
@@ -410,6 +432,20 @@ export default function App() {
           <p className="slots-hint">
             iPhone 請各點一次選圖（不要依賴一次多選）。兩格都選完會自動合併辨識。
           </p>
+
+          <label className="ocr-lang">
+            <span className="ocr-lang-label">OCR 語言</span>
+            <select
+              value={ocrLang}
+              disabled={busy}
+              onChange={(e) => onOcrLangChange(e.target.value as OcrLangPref)}
+              aria-label="OCR 語言偏好"
+            >
+              <option value="auto">自動（日文＋英文）</option>
+              <option value="ja">日文優先（日本明信片）</option>
+              <option value="en">英文優先（歐美地名）</option>
+            </select>
+          </label>
 
           <div className={`slot-grid ${busy ? 'busy' : ''}`}>
             <input
