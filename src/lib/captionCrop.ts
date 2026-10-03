@@ -59,7 +59,7 @@ export function captionBandFromRows(
   for (const run of runs) {
     const text: number[] = []
     for (let k = run.start; k <= run.end; k += 1) {
-      if (rows[k]!.contrast > 6) text.push(k)
+      if (rows[k]!.contrast > 4) text.push(k)
     }
     if (text.length < 2) continue
     if (!best || text.length > best.text.length) best = { ...run, text }
@@ -68,9 +68,15 @@ export function captionBandFromRows(
 
   const yBlue = rows[best.start]!.y
   const yText1 = rows[best.text[best.text.length - 1]!]!.y
-  const padBot = Math.round(imageHeight * 0.02)
-  const y0 = yBlue
-  const y1 = Math.min(rows[best.end]!.y, yText1 + padBot)
+  // Keep the whole blue panel, not just down to the last *high*-contrast
+  // title row — smaller address lines ("In Bad Berka bei der Kirche") sit
+  // lower with weaker contrast and were getting clipped.
+  const padBot = Math.round(imageHeight * 0.03)
+  const y0 = Math.max(0, yBlue - Math.round(imageHeight * 0.01))
+  const y1 = Math.min(
+    imageHeight,
+    Math.max(rows[best.end]!.y, yText1) + padBot,
+  )
   if (y1 - y0 < 40) return null
   return { y: y0, height: y1 - y0 }
 }

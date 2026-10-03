@@ -161,6 +161,8 @@ EERE BER
   it('rejects German commemorative inscriptions as titles', () => {
     expect(isCommemorativePhrase('Dem Gedenken Der Im Weltkrieg')).toBe(true)
     expect(isCommemorativePhrase('Gefallenen Söhne Unserer Stadt')).toBe(true)
+    expect(isCommemorativePhrase('Gefallanaen SAhne Unserer St')).toBe(true)
+    expect(isCommemorativePhrase('Dem Gedenken Der Im Welkrieg')).toBe(true)
     expect(isCommemorativePhrase('Konvent Plasy')).toBe(false)
     expect(extractLocalityFromHint('In Bad Berka bei der Kirche')).toBe(
       'Bad Berka',
@@ -212,6 +214,7 @@ Bad Berka
       map,
     ])
     expect(merged.title).toBe('Bad Berka')
+    expect(merged.searchQueries).toContain('Stadtkirche Bad Berka')
   })
 })
 
@@ -238,10 +241,11 @@ describe('caption band', () => {
     }
     const band = captionBandFromRows(rows, 2000)
     expect(band).not.toBeNull()
-    expect(band!.y).toBeGreaterThanOrEqual(900)
+    expect(band!.y).toBeGreaterThanOrEqual(860)
     expect(band!.y).toBeLessThan(980)
+    // Include the full blue panel so smaller address lines are not clipped.
     expect(band!.y + band!.height).toBeGreaterThan(1100)
-    expect(band!.y + band!.height).toBeLessThan(1250)
+    expect(band!.y + band!.height).toBeLessThan(1280)
   })
 })
 

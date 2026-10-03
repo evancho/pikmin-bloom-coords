@@ -95,11 +95,12 @@ function tidyLine(line: string): string {
  * War-memorial / commemorative inscriptions are common Bloom postcard titles
  * but geocode to the wrong city (e.g. "Dem Gedenken…" → Berlin). Prefer the
  * locality line ("In Bad Berka bei der Kirche") or the map town name instead.
+ * Matching is intentionally fuzzy for Tesseract mangling (Gefallanaen, Welkrieg).
  */
 export function isCommemorativePhrase(line: string): boolean {
   const t = tidyLine(line)
   if (
-    /\b(gedenken|gefallen(?:en)?|weltkrieg|kriegerdenkmal|kriegsopfer|zum\s+andenken|in\s+memory|fallen\s+sons|war\s+memorial|in\s+memoriam|aux?\s+morts|den\s+toten|ehrendenkmal|kriegsdenkmal)\b/i.test(
+    /\b(gedenken|gefall\w*|wel+t?krieg|kriegerdenkmal|kriegsopfer|kriegsdenkmal|zum\s+andenken|in\s+memory|fallen\s+sons|war\s+memorial|in\s+memoriam|aux?\s+morts|den\s+toten|ehrendenkmal)\b/i.test(
       t,
     )
   ) {
@@ -107,7 +108,16 @@ export function isCommemorativePhrase(line: string): boolean {
   }
   if (
     /^(Dem|Den|Der|Die|Zum|Zur|Für)\s+/i.test(t) &&
-    /\b(Gedenken|Andenken|Erinnerung|Opfer|Söhne|Söhne|Helden|Toten)\b/i.test(t)
+    /\b(Gedenken|Andenken|Erinnerung|Opfer|S[oöa]hne|Helden|Toten|Stadt)\b/i.test(
+      t,
+    )
+  ) {
+    return true
+  }
+  // Truncated OCR of "Gefallenen Söhne Unserer Stadt"
+  if (
+    /\bunserer?\s+st/i.test(t) &&
+    /\b(gefall|s[oöaä]hne|sohn|helden)/i.test(t)
   ) {
     return true
   }
@@ -519,7 +529,12 @@ export function localityHints(parsed: ParsedLocation): string[] {
 
 function isWeakOrCommemorativeTitle(title: string | null | undefined): boolean {
   if (!title) return true
-  return isCommemorativePhrase(title)
+  if (isCommemorativePhrase(title)) return true
+  // Prefer a clean 2-word map town over a long OCR-mangled postcard line.
+  if (title.split(/\s+/).length >= 4 && /[a-z][A-Z]|[A-Z]{2,}[a-z]/.test(title)) {
+    return true
+  }
+  return false
 }
 
 /**
@@ -570,6 +585,21 @@ export function mergeParsedLocations(
   const preferred = parts.find((p) => p.title === title)
   if (preferred) {
     for (const q of preferred.searchQueries) push(q)
+  }
+  // Memorial postcards often sit by the parish church; when OCR missed
+  // "bei der Kirche" but raw text still looks commemorative, bias queries.
+  const rawBlob = parts.map((p) => p.rawText).join('\n')
+  if (
+    title &&
+    looksLikeLatinName(title) &&
+    !hasCjk(title) &&
+    (isCommemorativePhrase(rawBlob) ||
+      parts.some((p) => p.title && isCommemorativePhrase(p.title)))
+  ) {
+    push(`Stadtkirche ${title}`)
+    push(`${title} Stadtkirche`)
+    push(`${title} Kirche`)
+    push(`${title} church`)
   }
   if (title && address) {
     // Don't fuse Latin town names with CJK-only phonetic addresses
