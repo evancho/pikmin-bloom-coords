@@ -64,6 +64,26 @@ Gemeentehuis
     expect(parsed.searchQueries.some((q) => q.includes('大分'))).toBe(false)
   })
 
+  it('prefers Konvent Plasy over a Japanese kana misread', () => {
+    const parsed = parseLocationFromOcr(`---eng---
+Konvent Plasy
+Distance: 8,412m Plasy
+---jpn---
+リーロー
+距離：8,412m
+`)
+    expect(parsed.title).toBe('Konvent Plasy')
+    expect(parsed.title).not.toMatch(/[ァ-ンー]/)
+  })
+
+  it('never keeps a pure-kana OCR title', () => {
+    const parsed = parseLocationFromOcr(`
+リーロー
+距離：1,234m
+`)
+    expect(parsed.title).toBeNull()
+  })
+
   it('prefers the English pass over a longer Japanese misread', () => {
     const parsed = parseLocationFromOcr(`---eng---
 Gemeentehuis Oud-Turnhout

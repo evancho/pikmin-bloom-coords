@@ -95,9 +95,22 @@ function isKanaNoise(line: string): boolean {
   return false
 }
 
+/** Pure kana misreads of Latin names (e.g. Konvent Plasy → リーロー). */
+function isMostlyKana(line: string): boolean {
+  const compact = line.replace(/\s/g, '')
+  if (compact.length < 2) return true
+  const kana = (compact.match(/[\u3040-\u30ff]/g) ?? []).length
+  const kanji = (compact.match(/[一-龯]/g) ?? []).length
+  return kana >= 2 && kanji === 0
+}
+
+function isStrongJapanesePlace(line: string): boolean {
+  return /神社|寺|駅|站|公園|滝|瀧|城|橋|港|山|湖|館|堂|宮|院|塔/.test(line)
+}
+
 function scoreTitle(line: string): number {
   let score = 0
-  if (/神社|寺|駅|站|公園|滝|瀧|城|橋|港|山|湖|館|堂|宮|院|塔/.test(line)) {
+  if (isStrongJapanesePlace(line)) {
     score += 5
   }
   if (line.length <= 12) score += 2
@@ -105,6 +118,7 @@ function scoreTitle(line: string): number {
   if (looksLikeAddress(line)) score -= 5
   if (/。/.test(line)) score -= 5
   if (isUiChrome(line)) score -= 10
+  if (isMostlyKana(line)) score -= 8
   // Reject pure OCR garbage with latin/symbols dominant
   const cjk = (line.match(/[\u3040-\u30ff\u3400-\u9fff]/g) ?? []).length
   if (cjk < line.replace(/\s/g, '').length * 0.6) score -= 3
@@ -175,7 +189,8 @@ export function parseLocationFromOcr(rawText: string): ParsedLocation {
       (l) =>
         scoreTitle(l) >= 5 &&
         l.length <= 24 &&
-        !isKanaNoise(l),
+        !isKanaNoise(l) &&
+        !isMostlyKana(l),
     ) ?? null
   const samePass = passes.eng === passes.jpn
   let latinCandidates = [
@@ -189,10 +204,13 @@ export function parseLocationFromOcr(rawText: string): ParsedLocation {
     ]
   }
   const latinTitle = [...latinCandidates].sort((a, b) => b.length - a.length)[0] ?? null
-  if (cjkTitle) {
-    title = cjkTitle
-  } else if (latinTitle) {
+  // Prefer a clean Latin title from the English OCR pass over Japanese
+  // misreads of European names (Konvent Plasy → リーロー). Keep strong
+  // Japanese place titles (神社／寺／公園…) when those are present.
+  if (latinTitle && !(cjkTitle && isStrongJapanesePlace(cjkTitle))) {
     title = latinTitle
+  } else if (cjkTitle) {
+    title = cjkTitle
   } else {
     title =
       ranked.find(
@@ -200,6 +218,7 @@ export function parseLocationFromOcr(rawText: string): ParsedLocation {
           scoreTitle(l) > 0 &&
           l.length <= 24 &&
           !isKanaNoise(l) &&
+          !isMostlyKana(l) &&
           /[一-龯]/.test(l),
       ) ?? null
   }
