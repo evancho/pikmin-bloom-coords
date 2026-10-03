@@ -55,7 +55,7 @@ function extractAddressFromDistanceLine(line: string): string | null {
 }
 
 const LATIN_NAME =
-  /(?<![A-Za-z])[A-Z][a-zà-ÿ]{2,}(?:[-'][A-Za-zà-ÿ]{2,})?(?:[ \t]+[A-Z][a-zà-ÿ]{2,}(?:[-'][A-Za-zà-ÿ]{2,})?){0,4}/g
+  /(?<![A-Za-zÀ-ÿ])[A-ZÀ-Ý][a-zà-ÿā-ž]{2,}(?:[-'][A-Za-zà-ÿā-ž]{2,})?(?:[ \t]+[A-ZÀ-Ý][a-zà-ÿā-ž]{2,}(?:[-'][A-Za-zà-ÿā-ž]{2,})?){0,4}/g
 
 function tidyLine(line: string): string {
   return cleanLine(
@@ -65,17 +65,21 @@ function tidyLine(line: string): string {
 
 /** Title Case place names such as "Gemeentehuis Oud-Turnhout". */
 export function looksLikeLatinName(line: string): boolean {
-  const t = tidyLine(line)
+  const t = tidyLine(line).replace(/\.+$/, '')
   if (t.length < 4 || t.length > 48) return false
   if (/[0-9]/.test(t)) return false
+  // Ampersand / symbols are almost always OCR noise (Klášter → Kl&ster).
+  if (/[&@#%^*_+=<>{}[\]|\\]/.test(t)) return false
   if (isUiChrome(t)) return false
   const compact = t.replace(/\s/g, '')
-  const letters = compact.match(/[A-Za-zÀ-ÿ]/g) ?? []
+  const letters = compact.match(/[A-Za-zÀ-ÿĀ-ž]/g) ?? []
   if (letters.length < 4) return false
   if (letters.length / compact.length < 0.75) return false
-  if (!/[a-zà-ÿ]/.test(t)) return false
+  if (!/[a-zà-ÿā-ž]/.test(t)) return false
   const words = t.split(/[\s-]+/).filter(Boolean)
-  if (words.length > 6) return false
+  // Bloom postcard titles are almost always multi-word ("Konvent Plasy").
+  // A lone leftover token after OCR noise ("Plasy" from "Kl&ster Plasy") is not enough.
+  if (words.length < 2 || words.length > 6) return false
   const shouting = words.filter(
     (w) => w.length > 2 && w === w.toUpperCase() && /[A-Z]/.test(w),
   )
@@ -84,7 +88,52 @@ export function looksLikeLatinName(line: string): boolean {
 }
 
 function latinNameCandidates(text: string): string[] {
-  return [...text.matchAll(LATIN_NAME)].map((m) => tidyLine(m[0]))
+  return [...text.matchAll(LATIN_NAME)]
+    .map((m) => tidyLine(m[0]).replace(/\.+$/, ''))
+    .filter(looksLikeLatinName)
+}
+
+/**
+ * Postcard titles are the first large Latin line. Prefer that over a longer
+ * subtitle like "Klášter Plasy." that English OCR often mangles.
+ */
+export function scoreLatinTitle(line: string, indexInEngLines: number): number {
+  const t = tidyLine(line).replace(/\.+$/, '')
+  let score = 0
+  score += Math.max(0, 16 - indexInEngLines * 5)
+  if (/[.。]$/.test(tidyLine(line))) score -= 5
+  if (/[&@#%^*_+=]/.test(line)) score -= 12
+  const words = t.split(/[\s-]+/).filter(Boolean)
+  if (words.length >= 2 && words.length <= 4) score += 4
+  if (
+    words.every((w) => /^[A-ZÀ-Ý][a-zà-ÿā-ž'’-]+$/.test(w))
+  ) {
+    score += 3
+  }
+  // Mild length preference among clean early titles only.
+  score += Math.min(t.length, 28) * 0.05
+  return score
+}
+
+function pickBestLatinTitle(engLines: string[], extras: string[]): string | null {
+  const scored: Array<{ line: string; score: number }> = []
+  engLines.forEach((line, i) => {
+    if (!looksLikeLatinName(line)) return
+    scored.push({
+      line: tidyLine(line).replace(/\.+$/, ''),
+      score: scoreLatinTitle(line, i),
+    })
+  })
+  for (const line of extras) {
+    if (!looksLikeLatinName(line)) continue
+    // Regex extras have no line index — treat as weaker than the first OCR line.
+    scored.push({
+      line: tidyLine(line).replace(/\.+$/, ''),
+      score: scoreLatinTitle(line, 2),
+    })
+  }
+  scored.sort((a, b) => b.score - a.score || b.line.length - a.line.length)
+  return scored[0]?.line ?? null
 }
 
 function isKanaNoise(line: string): boolean {
@@ -193,17 +242,17 @@ export function parseLocationFromOcr(rawText: string): ParsedLocation {
         !isMostlyKana(l),
     ) ?? null
   const samePass = passes.eng === passes.jpn
-  let latinCandidates = [
-    ...(samePass ? lines : engLines).filter(looksLikeLatinName),
-    ...latinNameCandidates(samePass ? normalized : normalizeOcrText(passes.eng)),
-  ]
-  if (!samePass && latinCandidates.length === 0) {
-    latinCandidates = [
-      ...linesFrom(passes.jpn).filter(looksLikeLatinName),
-      ...latinNameCandidates(normalizeOcrText(passes.jpn)),
-    ]
+  const latinSourceLines = samePass ? lines : engLines
+  let latinTitle = pickBestLatinTitle(
+    latinSourceLines,
+    latinNameCandidates(samePass ? normalized : normalizeOcrText(passes.eng)),
+  )
+  if (!latinTitle && !samePass) {
+    latinTitle = pickBestLatinTitle(
+      linesFrom(passes.jpn),
+      latinNameCandidates(normalizeOcrText(passes.jpn)),
+    )
   }
-  const latinTitle = [...latinCandidates].sort((a, b) => b.length - a.length)[0] ?? null
   // Prefer a clean Latin title from the English OCR pass over Japanese
   // misreads of European names (Konvent Plasy → リーロー). Keep strong
   // Japanese place titles (神社／寺／公園…) when those are present.

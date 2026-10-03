@@ -4,6 +4,9 @@ import { captionBandFromRows, measureRow } from './captionCrop'
 let workerPromise: Promise<Worker> | null = null
 let activeLangs = ''
 
+const LATIN_WHITELIST =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÁÄÅÆÇÉÍÐÑÓÖØÚÜÝÞßàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿĀāĂăĄąĆćĈĉĊċČčĎďĐđĒēĔĕĖėĘęĚěĜĝĞğĠġĢģĤĥĦħĨĩĪīĬĭĮįİıĲĳĴĵĶķĸĹĺĻļĽľĿŀŁłŃńŅņŇňŉŊŋŌōŎŏŐőŒœŔŕŖŗŘřŚśŜŝŞşŠšŢţŤťŦŧŨũŪūŬŭŮůŰűŲųŴŵŶŷŸŹźŻżŽž -'’."
+
 async function getWorker(): Promise<Worker> {
   if (!workerPromise) {
     workerPromise = (async () => {
@@ -18,7 +21,11 @@ async function getWorker(): Promise<Worker> {
   return workerPromise
 }
 
-async function withLang(langs: string, pageSegMode: PSM): Promise<Worker> {
+async function withLang(
+  langs: string,
+  pageSegMode: PSM,
+  extra: Record<string, string> = {},
+): Promise<Worker> {
   const worker = await getWorker()
   if (activeLangs !== langs) {
     await worker.reinitialize(langs)
@@ -27,6 +34,9 @@ async function withLang(langs: string, pageSegMode: PSM): Promise<Worker> {
   await worker.setParameters({
     preserve_interword_spaces: '1',
     tessedit_pageseg_mode: pageSegMode,
+    // Clear any previous whitelist when not provided.
+    tessedit_char_whitelist: '',
+    ...extra,
   })
   return worker
 }
@@ -51,7 +61,7 @@ function canvasToPng(canvas: HTMLCanvasElement): Promise<Blob> {
 }
 
 /**
- * Crop the blue caption under the postcard photo and scale it up.
+ * Crop the blue/purple caption under the postcard photo and scale it up.
  * Falls back to the middle of the screen when that panel isn't found.
  */
 async function cropForPostcard(image: File | Blob | string): Promise<Blob> {
@@ -113,6 +123,64 @@ async function cropForPostcard(image: File | Blob | string): Promise<Blob> {
   return canvasToPng(canvas)
 }
 
+/** White-on-dark postcard text → dark-on-light for Tesseract English. */
+async function enhanceForLatinOcr(image: Blob): Promise<Blob> {
+  if (typeof createImageBitmap === 'undefined' || typeof document === 'undefined') {
+    return image
+  }
+  const bitmap = await createImageBitmap(image)
+  const canvas = document.createElement('canvas')
+  canvas.width = bitmap.width
+  canvas.height = bitmap.height
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) {
+    bitmap.close()
+    return image
+  }
+  ctx.drawImage(bitmap, 0, 0)
+  bitmap.close()
+  const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height)
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i] ?? 0
+    const g = data[i + 1] ?? 0
+    const b = data[i + 2] ?? 0
+    // Invert luminance and stretch contrast so white glyphs become dark ink.
+    let lum = 255 - (r * 0.299 + g * 0.587 + b * 0.114)
+    lum = Math.max(0, Math.min(255, (lum - 40) * 1.55))
+    data[i] = lum
+    data[i + 1] = lum
+    data[i + 2] = lum
+  }
+  ctx.putImageData(new ImageData(data, width, height), 0, 0)
+  return canvasToPng(canvas)
+}
+
+/** Top of the caption is the bold place name — OCR it as a single line. */
+async function cropTitleLine(image: Blob): Promise<Blob> {
+  if (typeof createImageBitmap === 'undefined' || typeof document === 'undefined') {
+    return image
+  }
+  const bitmap = await createImageBitmap(image)
+  const w = bitmap.width
+  const h = bitmap.height
+  const sy = Math.floor(h * 0.08)
+  const sh = Math.max(24, Math.floor(h * 0.28))
+  const canvas = document.createElement('canvas')
+  const scale = 1.5
+  canvas.width = Math.max(1, Math.round(w * scale))
+  canvas.height = Math.max(1, Math.round(sh * scale))
+  const ctx = canvas.getContext('2d')
+  if (!ctx) {
+    bitmap.close()
+    return image
+  }
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  ctx.drawImage(bitmap, 0, sy, w, sh, 0, 0, canvas.width, canvas.height)
+  bitmap.close()
+  return canvasToPng(canvas)
+}
+
 export async function recognizeText(
   image: File | Blob | string,
   onProgress?: (pct: number) => void,
@@ -127,20 +195,39 @@ export async function recognizeText(
       target = image
     }
   }
-  onProgress?.(40)
+  onProgress?.(35)
 
   // One combined jpn+eng pass misreads Latin titles as kana. On the caption
   // crop, read Japanese and English separately and let the parser choose.
   if (mode === 'postcard') {
+    const caption = target instanceof Blob ? target : await imageBlob(target)
+    const latinReady = await enhanceForLatinOcr(caption)
+    const titleBand = await cropTitleLine(latinReady)
+
+    const engTitleWorker = await withLang('eng', PSM.SINGLE_LINE, {
+      tessedit_char_whitelist: LATIN_WHITELIST,
+    })
+    const engTitle = await engTitleWorker.recognize(titleBand)
+    onProgress?.(55)
+
+    const engFullWorker = await withLang('eng', PSM.SINGLE_BLOCK, {
+      // Keep digits for the distance line; still block ampersand noise.
+      tessedit_char_whitelist:
+        LATIN_WHITELIST + '0123456789,:/：',
+    })
+    const engFull = await engFullWorker.recognize(latinReady)
+    onProgress?.(75)
+
     const jpnWorker = await withLang('jpn', PSM.SINGLE_BLOCK)
-    const jpn = await jpnWorker.recognize(target)
-    onProgress?.(70)
-    const engWorker = await withLang('eng', PSM.SINGLE_BLOCK)
-    const eng = await engWorker.recognize(target)
+    const jpn = await jpnWorker.recognize(caption)
     onProgress?.(100)
+
+    const engText = [engTitle.data.text, engFull.data.text]
+      .filter(Boolean)
+      .join('\n')
     // Keep the passes separate so a longer Japanese misread of the same
     // Latin title cannot outrank the English pass.
-    return `---eng---\n${eng.data.text ?? ''}\n---jpn---\n${jpn.data.text ?? ''}`
+    return `---eng---\n${engText}\n---jpn---\n${jpn.data.text ?? ''}`
   }
 
   const worker = await withLang('jpn+eng', PSM.AUTO)
