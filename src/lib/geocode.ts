@@ -341,7 +341,9 @@ export async function geocodeBest(
         all.push(h)
       }
       const hasLandmark = all.some(
-        (c) => poiTypeScore(c.className, c.typeName) >= 7,
+        (c) =>
+          poiTypeScore(c.className, c.typeName) >= 7 &&
+          scoreAgainstQueries(c, cleanedQueries, localityHints) >= 12,
       )
       if (hasLandmark) {
         usedQuery =

@@ -24,7 +24,7 @@ import { archiveImages } from './types'
 type Tab = 'work' | 'archive'
 
 /** App build shown in UI so iOS users can confirm they got the update. */
-export const APP_BUILD = 'v1.2.3-geocode'
+export const APP_BUILD = 'v1.2.4-locality'
 
 const emptyWork = (): WorkItem => ({
   imageDataUrls: [],
