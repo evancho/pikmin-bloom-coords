@@ -54,6 +54,47 @@ function extractAddressFromDistanceLine(line: string): string | null {
   return rest.length >= 2 ? rest : null
 }
 
+const LATIN_NAME =
+  /(?<![A-Za-z])[A-Z][a-zà-ÿ]{2,}(?:[-'][A-Za-zà-ÿ]{2,})?(?:[ \t]+[A-Z][a-zà-ÿ]{2,}(?:[-'][A-Za-zà-ÿ]{2,})?){0,4}/g
+
+function tidyLine(line: string): string {
+  return cleanLine(
+    line.replace(/([A-Za-z])[〇○◯・·]+(?=[A-Za-z])/g, '$1'),
+  )
+}
+
+/** Title Case place names such as "Gemeentehuis Oud-Turnhout". */
+export function looksLikeLatinName(line: string): boolean {
+  const t = tidyLine(line)
+  if (t.length < 4 || t.length > 48) return false
+  if (/[0-9]/.test(t)) return false
+  if (isUiChrome(t)) return false
+  const compact = t.replace(/\s/g, '')
+  const letters = compact.match(/[A-Za-zÀ-ÿ]/g) ?? []
+  if (letters.length < 4) return false
+  if (letters.length / compact.length < 0.75) return false
+  if (!/[a-zà-ÿ]/.test(t)) return false
+  const words = t.split(/[\s-]+/).filter(Boolean)
+  if (words.length > 6) return false
+  const shouting = words.filter(
+    (w) => w.length > 2 && w === w.toUpperCase() && /[A-Z]/.test(w),
+  )
+  if (shouting.length === words.length) return false
+  return true
+}
+
+function latinNameCandidates(text: string): string[] {
+  return [...text.matchAll(LATIN_NAME)].map((m) => tidyLine(m[0]))
+}
+
+function isKanaNoise(line: string): boolean {
+  const compact = line.replace(/\s/g, '')
+  if (!compact) return true
+  const dashes = (compact.match(/[ー−—\-〜~]/g) ?? []).length
+  if (dashes >= compact.length * 0.25) return true
+  return false
+}
+
 function scoreTitle(line: string): number {
   let score = 0
   if (/神社|寺|駅|站|公園|滝|瀧|城|橋|港|山|湖|館|堂|宮|院|塔/.test(line)) {
@@ -84,12 +125,28 @@ function extractFalls(text: string): string[] {
 /**
  * Pull title / address / description hints from Pikmin Bloom OCR text.
  */
+function splitOcrPasses(rawText: string): { eng: string; jpn: string } {
+  if (rawText.includes('---eng---') && rawText.includes('---jpn---')) {
+    const eng = rawText.split('---eng---')[1]?.split('---jpn---')[0] ?? ''
+    const jpn = rawText.split('---jpn---')[1] ?? ''
+    return { eng, jpn }
+  }
+  return { eng: rawText, jpn: rawText }
+}
+
+function linesFrom(raw: string): string[] {
+  const normalized = normalizeOcrText(raw)
+  return normalized
+    .split(/\n|(?=(?:距離|距离|Distance)\s*[:：]?)/i)
+    .map(tidyLine)
+    .filter((l) => l.length > 0 && l !== '---eng---' && l !== '---jpn---')
+}
+
 export function parseLocationFromOcr(rawText: string): ParsedLocation {
-  const normalized = normalizeOcrText(rawText)
-  const lines = normalized
-    .split('\n')
-    .map(cleanLine)
-    .filter((l) => l.length > 0)
+  const passes = splitOcrPasses(rawText)
+  const normalized = normalizeOcrText(`${passes.eng}\n${passes.jpn}`)
+  const lines = linesFrom(`${passes.eng}\n${passes.jpn}`)
+  const engLines = linesFrom(passes.eng)
 
   let title: string | null = null
   let address: string | null = null
@@ -113,7 +170,39 @@ export function parseLocationFromOcr(rawText: string): ParsedLocation {
   )
 
   const ranked = [...cjkLines].sort((a, b) => scoreTitle(b) - scoreTitle(a))
-  title = ranked.find((l) => scoreTitle(l) > 0) ?? null
+  const cjkTitle =
+    ranked.find(
+      (l) =>
+        scoreTitle(l) >= 5 &&
+        l.length <= 24 &&
+        !isKanaNoise(l),
+    ) ?? null
+  const samePass = passes.eng === passes.jpn
+  let latinCandidates = [
+    ...(samePass ? lines : engLines).filter(looksLikeLatinName),
+    ...latinNameCandidates(samePass ? normalized : normalizeOcrText(passes.eng)),
+  ]
+  if (!samePass && latinCandidates.length === 0) {
+    latinCandidates = [
+      ...linesFrom(passes.jpn).filter(looksLikeLatinName),
+      ...latinNameCandidates(normalizeOcrText(passes.jpn)),
+    ]
+  }
+  const latinTitle = [...latinCandidates].sort((a, b) => b.length - a.length)[0] ?? null
+  if (cjkTitle) {
+    title = cjkTitle
+  } else if (latinTitle) {
+    title = latinTitle
+  } else {
+    title =
+      ranked.find(
+        (l) =>
+          scoreTitle(l) > 0 &&
+          l.length <= 24 &&
+          !isKanaNoise(l) &&
+          /[一-龯]/.test(l),
+      ) ?? null
+  }
 
   if (!address) {
     address = cjkLines.find((l) => looksLikeAddress(l)) ?? null
@@ -151,41 +240,55 @@ export function parseLocationFromOcr(rawText: string): ParsedLocation {
     if (t.length < 2) return
     // Skip garbage queries
     if (/^[>\-ー0-9\s]+/.test(t) && !hasCjk(t.slice(0, 2))) return
-    if ((t.match(/[\u3040-\u30ff\u3400-\u9fff]/g) ?? []).length < 2) return
+    const cjkCount = (t.match(/[\u3040-\u30ff\u3400-\u9fff]/g) ?? []).length
+    const latin = looksLikeLatinName(t)
+    if (cjkCount < 2 && !latin) return
     if (!searchQueries.includes(t)) searchQueries.push(t)
   }
 
-  // Specific → general (order matters for geocoding)
-  if (title && address) {
-    push(`${title} ${address}`)
-    push(`${title} ${address.replace(/\s+/g, '')}`)
-  }
-  if (title && /[滝瀧]神社/.test(title)) {
-    push('瀧三柱神社 佐伯市')
-    push('滝神社 佐伯市 上浦')
-    push('瀧三柱神社')
-  }
-  for (const f of falls) {
-    push(f)
-    if (title) push(`${title} ${f}`)
-  }
-  if (address && /浅海井|上浦/.test(address)) {
-    push('浅海井 佐伯市')
-    push('上浦浅海井浦')
-    if (title) push(`${title} 浅海井`)
-  }
-  push(address)
-  if (address) push(`${address} 日本`)
-  for (const label of placeLabels.slice(0, 3)) {
-    push(`${label} 日本`)
-    if (address) push(`${label} ${address}`)
-    push(label)
-  }
-  if (title) {
-    push(`${title} 大分`)
-    push(`${title} 日本`)
-    // bare title last — many homonyms
+  // Latin postcard titles (Europe, etc.) are the search string themselves.
+  // Don't append 日本 or a garbled CJK translation ahead of them.
+  if (title && looksLikeLatinName(title) && !hasCjk(title)) {
     push(title)
+    if (address && looksLikeAddress(address)) {
+      push(`${title} ${address}`)
+      push(address)
+    }
+  } else {
+    // Specific → general (order matters for geocoding)
+    if (title && address) {
+      push(`${title} ${address}`)
+      push(`${title} ${address.replace(/\s+/g, '')}`)
+    }
+    if (title && /[滝瀧]神社/.test(title)) {
+      push('瀧三柱神社 佐伯市')
+      push('滝神社 佐伯市 上浦')
+      push('瀧三柱神社')
+    }
+    for (const f of falls) {
+      push(f)
+      if (title) push(`${title} ${f}`)
+    }
+    if (address && /浅海井|上浦/.test(address)) {
+      push('浅海井 佐伯市')
+      push('上浦浅海井浦')
+      if (title) push(`${title} 浅海井`)
+    }
+    push(address)
+    if (address) push(`${address} 日本`)
+    for (const label of placeLabels.slice(0, 3)) {
+      push(`${label} 日本`)
+      if (address) push(`${label} ${address}`)
+      push(label)
+    }
+    if (title && hasCjk(title)) {
+      push(`${title} 大分`)
+      push(`${title} 日本`)
+    }
+    if (title) {
+      // bare title last — many homonyms
+      push(title)
+    }
   }
 
   return {
@@ -239,11 +342,8 @@ export function mergeParsedLocations(
   }
   if (parts.length === 1) return parts[0]!
 
-  const title =
-    parts.find((p) => p.title && /神社|寺|駅|公園|滝|瀧/.test(p.title))
-      ?.title ??
-    parts.find((p) => p.title)?.title ??
-    null
+  // Postcard is parsed first; keep its title when it found one.
+  const title = parts.find((p) => p.title)?.title ?? null
 
   const address =
     parts.find((p) => p.address && looksLikeAddress(p.address))?.address ??
