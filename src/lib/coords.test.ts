@@ -339,6 +339,20 @@ Kyoto Somewhere
     expect(parsed.title).toBe('青い屋根の家')
   })
 
+  it('zh preference keeps Chinese CJK titles over Latin OCR', () => {
+    const parsed = parseLocationFromOcr(
+      `---eng---
+an vere Fushimi Ward
+---jpn---
+---chi---
+巴特貝爾卡咖啡店
+距離：1,234m
+`,
+      'zh',
+    )
+    expect(parsed.title).toMatch(/巴特貝爾卡|咖啡/)
+  })
+
   it('en preference keeps Latin landmark titles', () => {
     const parsed = parseLocationFromOcr(
       `---eng---

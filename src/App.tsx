@@ -29,7 +29,7 @@ import { archiveImages } from './types'
 type Tab = 'work' | 'archive'
 
 /** App build shown in UI so iOS users can confirm they got the update. */
-export const APP_BUILD = 'v1.2.5-lang'
+export const APP_BUILD = 'v1.2.6-zh'
 
 const emptyWork = (): WorkItem => ({
   imageDataUrls: [],
@@ -100,7 +100,13 @@ export default function App() {
 
     const dataUrls = await Promise.all(files.map((f) => fileToDataUrl(f)))
     const langLabel =
-      lang === 'ja' ? '日文優先' : lang === 'en' ? '英文優先' : '自動'
+      lang === 'ja'
+        ? '日文優先'
+        : lang === 'zh'
+          ? '中文優先'
+          : lang === 'en'
+            ? '英文優先'
+            : '自動'
     // Keep UI aligned with slots: postcard then map (empty slot omitted from urls list
     // but we also store parallel labeled previews via slotPreview below)
     setWork({
@@ -443,6 +449,7 @@ export default function App() {
             >
               <option value="auto">自動（日文＋英文）</option>
               <option value="ja">日文優先（日本明信片）</option>
+              <option value="zh">中文優先（繁中／簡中）</option>
               <option value="en">英文優先（歐美地名）</option>
             </select>
           </label>
