@@ -292,13 +292,25 @@ function extractFalls(text: string): string[] {
 /**
  * Pull title / address / description hints from Pikmin Bloom OCR text.
  */
-function splitOcrPasses(rawText: string): { eng: string; jpn: string } {
+export type ParseLangPref = 'auto' | 'ja' | 'en' | 'zh'
+
+function splitOcrPasses(rawText: string): {
+  eng: string
+  jpn: string
+  chi: string
+} {
   if (rawText.includes('---eng---') && rawText.includes('---jpn---')) {
     const eng = rawText.split('---eng---')[1]?.split('---jpn---')[0] ?? ''
-    const jpn = rawText.split('---jpn---')[1] ?? ''
-    return { eng, jpn }
+    const afterJpn = rawText.split('---jpn---')[1] ?? ''
+    const jpn = afterJpn.includes('---chi---')
+      ? (afterJpn.split('---chi---')[0] ?? '')
+      : afterJpn
+    const chi = rawText.includes('---chi---')
+      ? (rawText.split('---chi---')[1] ?? '')
+      : ''
+    return { eng, jpn, chi }
   }
-  return { eng: rawText, jpn: rawText }
+  return { eng: rawText, jpn: rawText, chi: '' }
 }
 
 function linesFrom(raw: string): string[] {
@@ -306,18 +318,23 @@ function linesFrom(raw: string): string[] {
   return normalized
     .split(/\n|(?=(?:距離|距离|Distance)\s*[:：]?)/i)
     .map(tidyLine)
-    .filter((l) => l.length > 0 && l !== '---eng---' && l !== '---jpn---')
+    .filter(
+      (l) =>
+        l.length > 0 &&
+        l !== '---eng---' &&
+        l !== '---jpn---' &&
+        l !== '---chi---',
+    )
 }
-
-export type ParseLangPref = 'auto' | 'ja' | 'en'
 
 export function parseLocationFromOcr(
   rawText: string,
   langPref: ParseLangPref = 'auto',
 ): ParsedLocation {
   const passes = splitOcrPasses(rawText)
-  const normalized = normalizeOcrText(`${passes.eng}\n${passes.jpn}`)
-  const lines = linesFrom(`${passes.eng}\n${passes.jpn}`)
+  const cjkBlob = `${passes.jpn}\n${passes.chi}`
+  const normalized = normalizeOcrText(`${passes.eng}\n${cjkBlob}`)
+  const lines = linesFrom(`${passes.eng}\n${cjkBlob}`)
   const engLines = linesFrom(passes.eng)
 
   let title: string | null = null
@@ -350,7 +367,8 @@ export function parseLocationFromOcr(
         !isKanaNoise(l) &&
         !isMostlyKana(l),
     ) ?? null
-  const samePass = passes.eng === passes.jpn
+  const samePass =
+    passes.eng === passes.jpn && (!passes.chi || passes.chi === passes.eng)
   const latinSourceLines = samePass ? lines : engLines
   const hintLocality =
     lines.map(extractLocalityFromHint).find((x): x is string => Boolean(x)) ??
@@ -361,8 +379,8 @@ export function parseLocationFromOcr(
   )
   if (!latinTitle && !samePass) {
     latinTitle = pickBestLatinTitle(
-      linesFrom(passes.jpn),
-      latinNameCandidates(normalizeOcrText(passes.jpn)),
+      linesFrom(`${passes.jpn}\n${passes.chi}`),
+      latinNameCandidates(normalizeOcrText(`${passes.jpn}\n${passes.chi}`)),
     )
   }
   // Caption locality ("In Bad Berka bei der Kirche") beats memorial titles.
@@ -385,10 +403,10 @@ export function parseLocationFromOcr(
         /[一-龯]/.test(l),
     ) ?? null
 
-  // langPref=ja → always prefer Japanese titles when present.
+  // langPref=ja/zh → always prefer CJK titles when present.
   // auto → Latin for Europe, but keep strong JP places (神社／喫茶店…).
   // en → Latin first.
-  if (langPref === 'ja') {
+  if (langPref === 'ja' || langPref === 'zh') {
     title = cjkTitle ?? softCjk ?? latinTitle
   } else if (langPref === 'en') {
     title = latinTitle ?? cjkTitle ?? softCjk

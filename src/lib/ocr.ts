@@ -44,14 +44,14 @@ async function withLang(
 export type OcrMode = 'postcard' | 'full'
 
 /** User-selectable OCR language bias. Auto still runs eng+jpn. */
-export type OcrLangPref = 'auto' | 'ja' | 'en'
+export type OcrLangPref = 'auto' | 'ja' | 'en' | 'zh'
 
 export const OCR_LANG_STORAGE_KEY = 'bloom-pin-ocr-lang'
 
 export function loadOcrLangPref(): OcrLangPref {
   try {
     const v = localStorage.getItem(OCR_LANG_STORAGE_KEY)
-    if (v === 'ja' || v === 'en' || v === 'auto') return v
+    if (v === 'ja' || v === 'en' || v === 'zh' || v === 'auto') return v
   } catch {
     /* ignore */
   }
@@ -251,36 +251,35 @@ export async function recognizeText(
   // crop, read Japanese and English separately and let the parser choose.
   if (mode === 'postcard') {
     const caption = target instanceof Blob ? target : await imageBlob(target)
-    // ja: still run eng so distance lines like "Kyoto Fushimi Ward" survive;
-    // the parser (langPref) decides whether Latin titles may beat Japanese.
-    const runEng = true
-    const runJpn = langPref !== 'en'
+    // Still run eng so Latin address fragments survive; CJK/latin title
+    // preference is decided by langPref in the parser.
+    const runCjk = langPref !== 'en'
     let engText = ''
     let jpnText = ''
+    let chiText = ''
 
-    if (runEng) {
+    {
       const latinReady = await enhanceForLatinOcr(caption)
       const titleBand = await cropTitleLine(latinReady)
       const footerBand = await cropFooterLines(latinReady)
 
-      // English-only / auto: OCR the bold title line. Japanese-priority skips
-      // this pass — eng single-line often invents junk like "an vere…".
+      // Skip eng single-line title for ja/zh — it invents junk like "an vere…".
       let engTitleText = ''
-      if (langPref !== 'ja') {
+      if (langPref === 'auto' || langPref === 'en') {
         const engTitleWorker = await withLang('eng', PSM.SINGLE_LINE, {
           tessedit_char_whitelist: LATIN_WHITELIST,
         })
         const engTitle = await engTitleWorker.recognize(titleBand)
         engTitleText = engTitle.data.text ?? ''
       }
-      onProgress?.(runJpn ? 45 : 55)
+      onProgress?.(runCjk ? 40 : 55)
 
       const engFullWorker = await withLang('eng', PSM.SINGLE_BLOCK, {
         // Keep digits for the distance line; still block ampersand noise.
         tessedit_char_whitelist: LATIN_WHITELIST + '0123456789,:/：',
       })
       const engFull = await engFullWorker.recognize(latinReady)
-      onProgress?.(runJpn ? 60 : 80)
+      onProgress?.(runCjk ? 55 : 80)
 
       const engFooterWorker = await withLang('eng', PSM.SINGLE_BLOCK, {
         tessedit_char_whitelist: LATIN_WHITELIST + '0123456789,:/：',
@@ -291,23 +290,42 @@ export async function recognizeText(
         .join('\n')
     }
 
-    if (runJpn) {
-      onProgress?.(runEng ? 80 : 55)
-      const jpnWorker = await withLang('jpn', PSM.SINGLE_BLOCK)
-      const jpn = await jpnWorker.recognize(caption)
-      jpnText = jpn.data.text ?? ''
+    if (runCjk) {
+      onProgress?.(70)
+      if (langPref === 'zh') {
+        // Traditional Chinese first (app UI); + simplified for mixed screenshots.
+        const chiWorker = await withLang('chi_tra+chi_sim', PSM.SINGLE_BLOCK)
+        const chi = await chiWorker.recognize(caption)
+        chiText = chi.data.text ?? ''
+      } else {
+        // auto / ja
+        const jpnWorker = await withLang('jpn', PSM.SINGLE_BLOCK)
+        const jpn = await jpnWorker.recognize(caption)
+        jpnText = jpn.data.text ?? ''
+      }
     }
 
     if (langPref === 'en' && !jpnText) {
       jpnText = engText
     }
+    // Parser already folds ---chi--- into CJK lines; keep jpn slot filled for zh
+    // so older tooling that only reads ---jpn--- still sees the text.
+    if (langPref === 'zh' && chiText && !jpnText) {
+      jpnText = chiText
+    }
 
     onProgress?.(100)
-    return `---eng---\n${engText}\n---jpn---\n${jpnText}`
+    return `---eng---\n${engText}\n---jpn---\n${jpnText}\n---chi---\n${chiText}`
   }
 
   const mapLangs =
-    langPref === 'ja' ? 'jpn' : langPref === 'en' ? 'eng' : 'jpn+eng'
+    langPref === 'ja'
+      ? 'jpn'
+      : langPref === 'en'
+        ? 'eng'
+        : langPref === 'zh'
+          ? 'chi_tra+chi_sim'
+          : 'jpn+eng'
   const worker = await withLang(mapLangs, PSM.AUTO)
   const result = await worker.recognize(target)
   onProgress?.(100)
