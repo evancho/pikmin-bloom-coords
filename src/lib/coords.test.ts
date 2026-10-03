@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { captionBandFromRows, type CaptionRow } from './captionCrop'
 import { formatCoords, parseCoordsText } from './coords'
-import { queryPrefersJapan } from './geocode'
+import {
+  expandPlaceQueries,
+  nameMatchScore,
+  poiTypeScore,
+  queryPrefersJapan,
+  scoreGeocodeCandidate,
+} from './geocode'
 import {
   mergeParsedLocations,
   parseLocationFromOcr,
@@ -185,5 +191,63 @@ describe('geocode scope', () => {
   it('limits Japanese queries to Japan and lets Latin names search worldwide', () => {
     expect(queryPrefersJapan('滝神社 佐伯市')).toBe(true)
     expect(queryPrefersJapan('Gemeentehuis Oud-Turnhout')).toBe(false)
+  })
+
+  it('expands Konvent titles into monastery landmark queries', () => {
+    const qs = expandPlaceQueries('Konvent Plasy', 'Plasy')
+    expect(qs[0]).toBe('Konvent Plasy')
+    expect(qs).toContain('Klášter Plasy')
+    expect(qs).toContain('monastery Plasy')
+    expect(qs).toContain('Plasy')
+  })
+
+  it('scores monasteries above information boards', () => {
+    const board = scoreGeocodeCandidate(
+      {
+        displayName: 'Jak vodník ochránil konvent, Plasy, Česko',
+        lat: 49.932882,
+        lng: 13.386732,
+        importance: 0.0001,
+        className: 'information',
+        typeName: 'board',
+      },
+      'Konvent Plasy',
+      ['Plasy'],
+    )
+    const monastery = scoreGeocodeCandidate(
+      {
+        displayName: 'Klášter Plasy, Plzeňská, Plasy, Česko',
+        lat: 49.935769,
+        lng: 13.390775,
+        importance: 0.39,
+        className: 'amenity',
+        typeName: 'monastery',
+      },
+      'Klášter Plasy',
+      ['Plasy'],
+    )
+    expect(poiTypeScore('amenity', 'monastery')).toBeGreaterThan(
+      poiTypeScore('information', 'board'),
+    )
+    expect(monastery).toBeGreaterThan(board)
+    expect(nameMatchScore('Klášter Plasy, Plasy', 'Klášter Plasy')).toBeGreaterThan(5)
+  })
+})
+
+describe('latin geocode queries from OCR', () => {
+  it('includes Klášter / monastery queries for Konvent Plasy', () => {
+    const parsed = parseLocationFromOcr(`---eng---
+Konvent Plasy
+EERE © 9,575,818mPlasy Plasy
+Kl&ster Plasy.
+---jpn---
+`)
+    expect(parsed.title).toBe('Konvent Plasy')
+    expect(parsed.searchQueries).toContain('Konvent Plasy')
+    expect(parsed.searchQueries).toContain('Klášter Plasy')
+    expect(parsed.searchQueries).toContain('monastery Plasy')
+    expect(parsed.searchQueries.some((q) => /Klaster|Klášter/i.test(q))).toBe(
+      true,
+    )
   })
 })

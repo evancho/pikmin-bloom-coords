@@ -53,7 +53,7 @@ export default defineConfig(({ command }) => ({
       workbox: {
         // New cache name so installs still on the autoUpdate precache pick up
         // this prompt-banner build once, then wait for the in-app reload.
-        cacheId: 'bloom-pin-v1.2.2',
+        cacheId: 'bloom-pin-v1.2.3',
         skipWaiting: false,
         clientsClaim: true,
         cleanupOutdatedCaches: true,

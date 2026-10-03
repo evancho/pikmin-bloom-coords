@@ -1,4 +1,5 @@
 import type { ParsedLocation } from '../types'
+import { expandPlaceQueries } from './geocode'
 
 /** Remove spurious spaces Tesseract inserts between CJK characters. */
 export function normalizeOcrText(raw: string): string {
@@ -71,7 +72,14 @@ function tidyAddressFragment(raw: string | undefined): string | null {
   if (!rest) return null
   if (/^[\d?,.\sm]+$/i.test(rest)) return null
   if (rest.length < 2) return null
-  return rest
+  // Collapse duplicated locality tokens from OCR ("Plasy Plasy" → "Plasy").
+  const parts = rest.split(/\s+/).filter(Boolean)
+  const uniq: string[] = []
+  for (const p of parts) {
+    if (!uniq.some((u) => u.toLowerCase() === p.toLowerCase())) uniq.push(p)
+  }
+  rest = uniq.join(' ')
+  return rest.length >= 2 ? rest : null
 }
 
 const LATIN_NAME =
@@ -330,17 +338,29 @@ export function parseLocationFromOcr(rawText: string): ParsedLocation {
     if (/^[>\-ー0-9\s]+/.test(t) && !hasCjk(t.slice(0, 2))) return
     const cjkCount = (t.match(/[\u3040-\u30ff\u3400-\u9fff]/g) ?? []).length
     const latin = looksLikeLatinName(t)
-    if (cjkCount < 2 && !latin) return
+    // Allow synonym expansions like "monastery Plasy" / "Klášter Plasy".
+    const landmarkQuery =
+      /^(monastery|abbey|convent|castle|church|museum|klášter)\b/i.test(t) ||
+      /\b(monastery|abbey|convent|castle|church)\s*$/i.test(t) ||
+      /^Klášter\b/i.test(t)
+    if (cjkCount < 2 && !latin && !landmarkQuery) return
     if (!searchQueries.includes(t)) searchQueries.push(t)
   }
 
   // Latin postcard titles (Europe, etc.) are the search string themselves.
   // Don't append 日本 or a garbled CJK translation ahead of them.
   if (title && looksLikeLatinName(title) && !hasCjk(title)) {
-    push(title)
-    if (address && looksLikeAddress(address)) {
-      push(`${title} ${address}`)
-      push(address)
+    for (const q of expandPlaceQueries(title, address)) push(q)
+    // Recover OCR-mangled local names (Kl&ster Plasy → Klaster / Klášter Plasy)
+    // as extra queries; they often match OSM landmarks better than "Konvent …".
+    for (const line of engLines) {
+      if (!/[&@]/.test(line)) continue
+      const repairedA = tidyLine(line).replace(/&/g, 'a').replace(/\.+$/, '')
+      const repairedAcute = tidyLine(line).replace(/&/g, 'á').replace(/\.+$/, '')
+      if (looksLikeLatinName(repairedA)) push(repairedA)
+      if (repairedAcute !== repairedA && /[A-Za-zÁá]/.test(repairedAcute)) {
+        push(repairedAcute)
+      }
     }
   } else {
     // Specific → general (order matters for geocoding)
@@ -408,6 +428,18 @@ export function localityHints(parsed: ParsedLocation): string[] {
     if (blob.includes(h) || parsed.searchQueries.some((q) => q.includes(h))) {
       hints.push(h)
     }
+  }
+  // Latin locality token from the title ("Plasy" in "Konvent Plasy").
+  if (parsed.title && looksLikeLatinName(parsed.title)) {
+    const parts = parsed.title.split(/\s+/).filter(Boolean)
+    if (parts.length >= 2) {
+      const last = parts[parts.length - 1]!
+      if (last.length >= 3 && !hints.includes(last)) hints.push(last)
+    }
+  }
+  if (parsed.address && /^[A-Za-zÀ-ÿ]/.test(parsed.address)) {
+    const token = parsed.address.split(/\s+/)[0]!
+    if (token.length >= 3 && !hints.includes(token)) hints.push(token)
   }
   return hints
 }
