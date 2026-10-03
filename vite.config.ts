@@ -97,6 +97,8 @@ export default defineConfig(({ command }) => ({
     },
   },
   preview: {
+    // Allow temporary tunnels (e.g. trycloudflare.com) for pre-merge phone tests.
+    allowedHosts: true,
     proxy: {
       '/api/nominatim': {
         target: 'https://nominatim.openstreetmap.org',
