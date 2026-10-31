@@ -73,6 +73,31 @@ Gemeentehuis
     expect(parsed.searchQueries.some((q) => q.includes('大分'))).toBe(false)
   })
 
+  it('keeps an English title with lowercase common nouns (La Salle Lake)', () => {
+    // Real OCR output from a BC postcard: the old lowerLead rule rejected
+    // "La Salle Lake recreation area" as noise and fell back to the region
+    // fragment "Fort George" from the distance line.
+    const parsed = parseLocationFromOcr(`---eng---
+La Salle Lake recreation area
+enfrance
+
+PERE - 9,498,709mFraser-Fort George
+
+La Salle ake Log aalmereg.s o smal 20-
+ete camnnriREE RES EEE 1 AH An
+---jpn---
+のオ 可サリルク05 まっ 店 でし リーの 二記1た せ ジーン本
+La Salle Lake recreation qreg
+enifraqnce
+距離 ・ の498,709mFraser-Fort George
+La Salle 人語導導に 20-
+---chi---
+`)
+    expect(parsed.title).toBe('La Salle Lake recreation area')
+    expect(parsed.address).toContain('Fraser-Fort George')
+    expect(parsed.searchQueries[0]).toBe('La Salle Lake recreation area')
+  })
+
   it('prefers Konvent Plasy over a mangled Kl&ster subtitle', () => {
     const parsed = parseLocationFromOcr(`---eng---
 Konvent Plasy
@@ -312,6 +337,7 @@ describe('japanese postcard titles', () => {
     expect(isWeakLatinOcrTitle('an vere Fushimi Ward')).toBe(true)
     expect(isWeakLatinOcrTitle('Kyoto Fushimi Ward')).toBe(false)
     expect(isWeakLatinOcrTitle('Konvent Plasy')).toBe(false)
+    expect(isWeakLatinOcrTitle('La Salle Lake recreation area')).toBe(false)
   })
 
   it('prefers 喫茶店リゲル over eng OCR ward junk in auto mode', () => {

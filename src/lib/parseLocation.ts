@@ -257,7 +257,10 @@ export function isWeakLatinOcrTitle(line: string): boolean {
   }
   const words = t.split(/\s+/).filter(Boolean)
   const lowerLead = words.filter((w) => /^[a-z]/.test(w)).length
-  if (words.length >= 3 && lowerLead >= 2) return true
+  // Only weak when the title itself starts lowercase ("an vere Fushimi Ward").
+  // English postcard titles legitimately carry lowercase common nouns
+  // ("La Salle Lake recreation area") — do not reject those.
+  if (words.length >= 3 && lowerLead >= 2 && /^[a-z]/.test(t)) return true
   return false
 }
 
