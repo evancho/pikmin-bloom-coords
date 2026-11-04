@@ -79,6 +79,12 @@ const REGION_BOXES: Array<{
     countrycodes: 'jp',
   },
   {
+    match: /東広島|西条町|御薗宇/,
+    label: 'higashihiroshima',
+    viewbox: { south: 34.2, north: 34.55, west: 132.45, east: 132.95 },
+    countrycodes: 'jp',
+  },
+  {
     match: /Theewaterskloof|Theewaiterskloof/i,
     label: 'theewaterskloof',
     viewbox: { south: -34.55, north: -33.85, west: 18.95, east: 19.75 },
@@ -155,7 +161,7 @@ export function inferPrecision(
   const t = (typeName ?? '').toLowerCase()
   const key = `${c}/${t}`
   if (
-    /place_of_worship|cathedral|chapel|church|temple|shrine|monastery|castle|palace|museum|attraction|ruins|memorial|monument|tower|bridge|artwork|viewpoint|zoo|theme_park/.test(
+    /place_of_worship|cathedral|chapel|church|temple|shrine|monastery|castle|palace|museum|attraction|ruins|memorial|monument|tower|bridge|artwork|viewpoint|zoo|theme_park|restaurant|fast_food|cafe|food_court/.test(
       key,
     )
   ) {
@@ -286,7 +292,7 @@ export function poiTypeScore(className?: string, typeName?: string): number {
   const t = (typeName ?? '').toLowerCase()
   const key = `${c}/${t}`
   if (
-    /monastery|place_of_worship|cathedral|chapel|church|temple|shrine|castle|palace|museum|attraction|ruins|memorial|monument|tower|bridge|airport|university|zoo|theme_park|artwork|viewpoint/.test(
+    /monastery|place_of_worship|cathedral|chapel|church|temple|shrine|castle|palace|museum|attraction|ruins|memorial|monument|tower|bridge|airport|university|zoo|theme_park|artwork|viewpoint|restaurant|fast_food|cafe|food_court/.test(
       key,
     )
   ) {
@@ -379,6 +385,21 @@ export function scoreGeocodeCandidate(
   let score = (candidate.importance ?? 0) * 10
   score += poiTypeScore(candidate.className, candidate.typeName)
   score += nameMatchScore(candidate.displayName, query)
+  // The leading name ("びっくりドンキー") must beat a hall that only
+  // shares the locality ("御薗宇地域センター").
+  const headToken = query
+    .split(/[\s,]+/)
+    .map((t) => t.trim())
+    .find((t) => t.length >= 4 && !/[市区町村郡県]$/.test(t))
+  if (
+    headToken &&
+    candidate.displayName
+      .slice(0, 80)
+      .toLowerCase()
+      .includes(headToken.toLowerCase())
+  ) {
+    score += 20
+  }
   score += localityConsistencyScore(candidate.displayName, localityHints)
   for (const h of localityHints) {
     if (candidate.displayName.includes(h)) score += 2

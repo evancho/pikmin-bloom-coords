@@ -89,8 +89,10 @@ export function captionBandFromRows(
     if (text.length < 2) continue
     const textRatio = text.length / len
     const flatShare = flat / len
-    // Photo sky / water: almost every row is textured → skip.
-    if (textRatio > 0.5) continue
+    // Photo sky / water: almost every row is textured and almost none are flat.
+    // A caption with several lines of body text can sit just over 50% text
+    // rows and still have a flat field between the lines (びっくりドンキー).
+    if (textRatio > 0.5 && flatShare < 0.2) continue
     // Caption cards have a flat purple/blue field between sparse glyph rows.
     let score = text.length * 2 + flatShare * 20
     // Prefer bands in the lower half of the screenshot (under the photo).

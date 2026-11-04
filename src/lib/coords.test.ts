@@ -315,6 +315,32 @@ describe('caption band', () => {
     expect(band!.y + band!.height).toBeGreaterThan(1620)
     expect(band!.y + band!.height).toBeLessThan(1700)
   })
+
+  it('keeps a multi-line purple caption even when text rows exceed half', () => {
+    const rows: CaptionRow[] = []
+    for (let y = 850; y < 910; y += 2) {
+      rows.push({ y, r: 50, g: 91, b: 120, contrast: 3 })
+    }
+    for (let y = 910; y < 1108; y += 2) {
+      rows.push({ y, r: 15, g: 60, b: 95, contrast: 4.4 })
+    }
+    // 60% text rows, 40% flat — the old >50% cutoff dropped this card.
+    for (let y = 1108; y < 1594; y += 2) {
+      const cycle = ((y - 1108) / 2) % 10
+      rows.push({
+        y,
+        r: 53,
+        g: 40,
+        b: 113,
+        contrast: cycle < 6 ? 12 : 0.2,
+      })
+    }
+    const band = captionBandFromRows(rows, 1626)
+    expect(band).not.toBeNull()
+    expect(band!.y).toBeGreaterThanOrEqual(1100)
+    expect(band!.y).toBeLessThan(1200)
+    expect(band!.y + band!.height).toBeGreaterThan(1500)
+  })
 })
 
 describe('geocode scope', () => {
@@ -617,6 +643,32 @@ FEB : 379,779mT ERT KERR
   })
 })
 
+describe('Bikkuri Donkey postcard', () => {
+  const ocr = `---eng---
+A yy te
+PERE  ImREET ARIIHEF
+---jpn---
+びっ 0 ドンキー 距離 ・1m東廣島市 西條町御園宇 東広島市御菌宇にあるハンバーグレストラン でオシャレな内付でハンバーグを主とする多 くのメニューがあります 。
+ぴらっらくの ンキー
+距離 ・1m東廣島市 西條町御園宇
+東広島市御蘭宇にあるハンバーグレストラン
+---chi---
+`
+
+  it('places びっくりドンキー in Saijo, Higashihiroshima', () => {
+    const parsed = parseLocationFromOcr(ocr)
+    expect(parsed.title).toBe('びっくりドンキー')
+    expect(parsed.address).toBe('東広島市 西条町 御薗宇')
+    expect(parsed.searchQueries[0]).toContain('びっくりドンキー')
+    expect(parsed.searchQueries[0]).toContain('御薗宇')
+    expect(parsed.description).toContain('御薗宇')
+    expect(parsed.description).not.toMatch(/御[菌蘭]宇/)
+    expect(regionBiasFromHints(localityHints(parsed))?.label).toBe(
+      'higashihiroshima',
+    )
+  })
+})
+
 describe('imageEnhance', () => {
   it('computes an Otsu threshold that separates dark and light peaks', () => {
     const lums = new Uint8Array(1000)
@@ -714,7 +766,41 @@ Kaldfjord Church
   it('marks Open-Meteo-style hits as locality precision', () => {
     expect(inferPrecision('place', 'locality')).toBe('locality')
     expect(inferPrecision('amenity', 'place_of_worship')).toBe('landmark')
+    expect(inferPrecision('amenity', 'restaurant')).toBe('landmark')
     expect(inferPrecision('highway', 'residential')).toBe('street')
+  })
+
+  it('ranks the named restaurant above a hall that only shares the quarter', () => {
+    const query = 'びっくりドンキー 東広島市 西条町 御薗宇'
+    const hints = ['東広島', '西条', '御薗宇']
+    const region = regionBiasFromHints(hints)
+    const restaurant = scoreGeocodeCandidate(
+      {
+        displayName: 'びっくりドンキー, 国道375号, 東広島市, 広島県, 日本',
+        lat: 34.408428,
+        lng: 132.750994,
+        importance: 0.01,
+        className: 'amenity',
+        typeName: 'restaurant',
+      },
+      query,
+      hints,
+      region,
+    )
+    const hall = scoreGeocodeCandidate(
+      {
+        displayName: 'こもれびの家 御薗宇, 西条中央巡回線, 東広島市, 広島県, 日本',
+        lat: 34.416369,
+        lng: 132.753848,
+        importance: 0.01,
+        className: 'amenity',
+        typeName: 'social_facility',
+      },
+      query,
+      hints,
+      region,
+    )
+    expect(restaurant).toBeGreaterThan(hall)
   })
 
   it('flags far-away candidates as suspicious', () => {

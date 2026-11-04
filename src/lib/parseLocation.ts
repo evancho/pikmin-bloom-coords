@@ -46,11 +46,38 @@ function isUiChrome(s: string): boolean {
   return false
 }
 
+/** Keep the admin chain after 距離 and drop the caption sentence that follows. */
+function trimJapaneseAddress(raw: string): string {
+  let s = (raw.split(/[。．]/)[0] ?? raw).trim()
+  s = (s.split(/にある|です|ます|でオ|でお/)[0] ?? s).trim()
+  // The caption repeats the city ("…御園宇東広島市…"). Drop that second city,
+  // including the kanji that sit in front of its 市.
+  const marks = [...s.matchAll(/市/g)]
+  const second = marks[1]?.index
+  if (second == null) return s
+  let head = s.slice(0, second)
+  for (const n of [2, 3, 4]) {
+    if (head.length <= n + 1) continue
+    const tail = head.slice(-n)
+    const before = head[head.length - n - 1] ?? ''
+    const city = s.slice(second - n, second + 1)
+    if (
+      /^[一-龯]+$/.test(tail) &&
+      city === `${tail}市` &&
+      /[町村字宇区郡]/.test(before)
+    ) {
+      head = head.slice(0, -n)
+      break
+    }
+  }
+  return head.trim()
+}
+
 function extractAddressFromDistanceLine(line: string): string | null {
   const m = line.match(
-    /(?:距離|距离|Distance)\s*[:：]?\s*[\d,，.?\s]+\s*m?\s*(.+)$/i,
+    /(?:距離|距离|Distance)\s*[:：・.]?\s*[\d,，.?\s]+\s*m\s*(.+)$/i,
   )
-  if (m) return tidyAddressFragment(m[1])
+  if (m) return tidyAddressFragment(trimJapaneseAddress(m[1]))
   // English OCR often mangles 距離 into noise but keeps "123m Place"
   // or glued "7,889,280mKvaløya" / "889 280mKvaløva".
   const loose = line.match(
@@ -97,6 +124,35 @@ function tidyAddressFragment(raw: string | undefined): string | null {
   if (!rest) return null
   if (/^[\d?,.\sm]+$/i.test(rest)) return null
   if (rest.length < 2) return null
+  // Bloom's Traditional Chinese UI writes 廣/條; the place 御薗宇 is 御園宇 there,
+  // and jpn OCR turns 薗 into 菌 or 蘭.
+  rest = rest.replace(
+    /[廣條縣國濱澤圓臺鹽邊應會發對關鐵驛龍藝]/g,
+    (ch) =>
+      ({
+        廣: '広',
+        條: '条',
+        縣: '県',
+        國: '国',
+        濱: '浜',
+        澤: '沢',
+        圓: '円',
+        臺: '台',
+        鹽: '塩',
+        邊: '辺',
+        應: '応',
+        會: '会',
+        發: '発',
+        對: '対',
+        關: '関',
+        鐵: '鉄',
+        驛: '駅',
+        龍: '竜',
+        藝: '芸',
+      })[ch] ?? ch,
+  )
+  rest = rest.replace(/御[園薗菌蘭]宇/g, '御薗宇')
+  rest = rest.replace(/([市区町村郡])(?=\S)/g, '$1 ')
   // "Kvaløva" is the usual y→v miss of Norwegian "…øya" (the island).
   rest = rest.replace(/øva\b/gi, 'øya')
   const parts = rest.split(/\s+/).filter(Boolean)
@@ -236,6 +292,8 @@ export function looksLikeLatinName(line: string): boolean {
   // Bloom postcard titles are almost always multi-word ("Konvent Plasy").
   // A lone leftover token after OCR noise ("Plasy" from "Kl&ster Plasy") is not enough.
   if (words.length < 2 || words.length > 6) return false
+  // "A yy te" is OCR dust. Real titles have at least one full word.
+  if (!words.some((w) => w.length >= 4)) return false
   // Administrative ward lines are addresses, not postcard titles.
   if (
     /\b(Ward|District|Prefecture)\b/i.test(t) &&
@@ -635,6 +693,16 @@ export function parseLocationFromOcr(
     description = beachLine.replace(/\s/g, '')
   }
 
+  // "びっ 0 ドンキー" is the usual miss of the kana title びっくりドンキー.
+  const compactAll = normalized.replace(/\s/g, '')
+  if (
+    /ドンキ[ーィ]/.test(compactAll) &&
+    /びっ/.test(compactAll) &&
+    !(title && looksLikeLatinName(title) && !isShoutyOcrNoise(title))
+  ) {
+    title = 'びっくりドンキー'
+  }
+
   if (!address) {
     address = cjkLines.find((l) => looksLikeAddress(l)) ?? null
   }
@@ -655,6 +723,9 @@ export function parseLocationFromOcr(
       ) ??
       lines.find((l) => isCaptionSentence(l) && l !== title) ??
       null
+  }
+  if (description) {
+    description = description.replace(/御[園薗菌蘭]宇/g, '御薗宇')
   }
 
   const placeLabels = cjkLines.filter((l) => {
@@ -807,6 +878,9 @@ export function localityHints(parsed: ParsedLocation): string[] {
     '津久見',
     '波照間',
     '竹富',
+    '東広島',
+    '西条',
+    '御薗宇',
     '京都',
     '東京',
     '大阪',
