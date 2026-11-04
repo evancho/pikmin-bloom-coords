@@ -1,44 +1,94 @@
 import { createWorker, PSM, type Worker } from 'tesseract.js'
-import { captionBandFromRows, measureRow } from './captionCrop'
+import {
+  captionBandFromRows,
+  captionLineBandsFromRows,
+  measureRow,
+} from './captionCrop'
+import {
+  cropRect,
+  enhanceForCjkOcr,
+  enhanceForLatinOcr,
+  scaleToGlyphHeight,
+} from './imageEnhance'
 
-let workerPromise: Promise<Worker> | null = null
-let activeLangs = ''
+type WorkerSlot = {
+  langs: string
+  worker: Worker | null
+  loading: Promise<Worker> | null
+}
+
+const slots: Record<string, WorkerSlot> = {
+  eng: { langs: 'eng', worker: null, loading: null },
+  jpn: { langs: 'jpn', worker: null, loading: null },
+  nor: { langs: 'nor', worker: null, loading: null },
+  'eng+nor': { langs: 'eng+nor', worker: null, loading: null },
+  chi: { langs: 'chi_tra+chi_sim', worker: null, loading: null },
+}
 
 const LATIN_WHITELIST =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÁÄÅÆÇÉÍÐÑÓÖØÚÜÝÞßàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿĀāĂăĄąĆćĈĉĊċČčĎďĐđĒēĔĕĖėĘęĚěĜĝĞğĠġĢģĤĥĦħĨĩĪīĬĭĮįİıĲĳĴĵĶķĸĹĺĻļĽľĿŀŁłŃńŅņŇňŉŊŋŌōŎŏŐőŒœŔŕŖŗŘřŚśŜŝŞşŠšŢţŤťŦŧŨũŪūŬŭŮůŰűŲųŴŵŶŷŸŹźŻżŽž -'’."
 
-async function getWorker(): Promise<Worker> {
-  if (!workerPromise) {
-    workerPromise = (async () => {
-      const worker = await createWorker(['jpn', 'eng'])
-      activeLangs = 'jpn+eng'
-      await worker.setParameters({
-        preserve_interword_spaces: '1',
-      })
+const MIN_WORD_CONFIDENCE = 40
+
+async function getLangWorker(key: keyof typeof slots): Promise<Worker> {
+  const slot = slots[key]!
+  if (slot.worker) return slot.worker
+  if (!slot.loading) {
+    slot.loading = (async () => {
+      const langs = slot.langs.includes('+')
+        ? slot.langs.split('+')
+        : [slot.langs]
+      const worker = await createWorker(langs)
+      await worker.setParameters({ preserve_interword_spaces: '1' })
+      slot.worker = worker
       return worker
     })()
   }
-  return workerPromise
+  return slot.loading
 }
 
-async function withLang(
-  langs: string,
+async function recognizeWith(
+  key: keyof typeof slots,
+  image: Blob,
   pageSegMode: PSM,
   extra: Record<string, string> = {},
-): Promise<Worker> {
-  const worker = await getWorker()
-  if (activeLangs !== langs) {
-    await worker.reinitialize(langs)
-    activeLangs = langs
-  }
+): Promise<{ text: string; confidence: number }> {
+  const worker = await getLangWorker(key)
   await worker.setParameters({
     preserve_interword_spaces: '1',
     tessedit_pageseg_mode: pageSegMode,
-    // Clear any previous whitelist when not provided.
     tessedit_char_whitelist: '',
     ...extra,
   })
-  return worker
+  const result = await worker.recognize(image)
+  // tesseract.js v7: words live under blocks → paragraphs → lines.
+  const words: Array<{ text: string; confidence: number }> = []
+  for (const block of result.data.blocks ?? []) {
+    for (const para of block.paragraphs ?? []) {
+      for (const line of para.lines ?? []) {
+        for (const w of line.words ?? []) {
+          words.push({ text: w.text, confidence: w.confidence })
+        }
+      }
+    }
+  }
+  const confs = words
+    .map((w) => w.confidence)
+    .filter((c): c is number => typeof c === 'number' && Number.isFinite(c))
+  const mean =
+    confs.length > 0
+      ? confs.reduce((a, b) => a + b, 0) / confs.length
+      : (result.data.confidence ?? 0)
+  // Drop very-low-confidence tokens from the searchable string.
+  let text = result.data.text ?? ''
+  if (words.length) {
+    const kept = words
+      .filter((w) => (w.confidence ?? 0) >= MIN_WORD_CONFIDENCE)
+      .map((w) => w.text)
+      .filter(Boolean)
+    if (kept.length) text = kept.join(' ')
+  }
+  return { text, confidence: mean }
 }
 
 export type OcrMode = 'postcard' | 'full'
@@ -74,42 +124,38 @@ async function imageBlob(image: File | Blob | string): Promise<Blob> {
   return image
 }
 
-function canvasToPng(canvas: HTMLCanvasElement): Promise<Blob> {
-  return new Promise((resolve, reject) => {
-    canvas.toBlob(
-      (b) => (b ? resolve(b) : reject(new Error('canvas toBlob failed'))),
-      'image/png',
-    )
-  })
+type PostcardCrop = {
+  caption: Blob
+  titleBand: Blob | null
+  footerBand: Blob | null
+  glyphPx: number
 }
 
-/**
- * Crop the blue/purple caption under the postcard photo and scale it up.
- * Falls back to the middle of the screen when that panel isn't found.
- */
-async function cropForPostcard(image: File | Blob | string): Promise<Blob> {
+async function cropPostcardParts(
+  image: File | Blob | string,
+): Promise<PostcardCrop> {
+  const blob = await imageBlob(image)
   if (typeof createImageBitmap === 'undefined' || typeof document === 'undefined') {
-    return imageBlob(image)
+    return { caption: blob, titleBand: null, footerBand: null, glyphPx: 18 }
   }
 
-  const blob = await imageBlob(image)
   const bitmap = await createImageBitmap(blob)
   const w = bitmap.width
   const h = bitmap.height
-
   const sample = document.createElement('canvas')
   sample.width = w
   sample.height = h
   const sampleCtx = sample.getContext('2d', { willReadFrequently: true })
   if (!sampleCtx) {
     bitmap.close()
-    return blob
+    return { caption: blob, titleBand: null, footerBand: null, glyphPx: 18 }
   }
   sampleCtx.drawImage(bitmap, 0, 0)
   const x0 = Math.floor(w * 0.1)
   const x1 = Math.floor(w * 0.9)
-  const yStart = Math.floor(h * 0.28)
-  const yEnd = Math.floor(h * 0.82)
+  // Include lower purple cards (Kaldfjord ~0.72–0.84 of frame).
+  const yStart = Math.floor(h * 0.25)
+  const yEnd = Math.floor(h * 0.92)
   const region = sampleCtx.getImageData(0, 0, w, h)
   const rows = []
   for (let y = yStart; y < yEnd; y += 2) {
@@ -121,113 +167,109 @@ async function cropForPostcard(image: File | Blob | string): Promise<Blob> {
   const sw = Math.floor(w * 0.86)
   let sy: number
   let sh: number
-  let scale = 1
   if (band) {
     sy = band.y
     sh = band.height
-    scale = 2
   } else {
-    sy = Math.floor(h * 0.12)
-    sh = Math.floor(h * 0.62)
+    sy = Math.floor(h * 0.45)
+    sh = Math.floor(h * 0.35)
   }
 
-  const canvas = document.createElement('canvas')
-  canvas.width = Math.max(1, Math.round(sw * scale))
-  canvas.height = Math.max(1, Math.round(sh * scale))
-  const ctx = canvas.getContext('2d')
-  if (!ctx) {
-    bitmap.close()
+  const caption = await cropRect(bitmap, sx, sy, sw, sh, 1)
+
+  // Re-measure inside the caption crop for title / footer line bands.
+  const capBitmap = await createImageBitmap(caption)
+  const capCanvas = document.createElement('canvas')
+  capCanvas.width = capBitmap.width
+  capCanvas.height = capBitmap.height
+  const capCtx = capCanvas.getContext('2d', { willReadFrequently: true })
+  let titleBand: Blob | null = null
+  let footerBand: Blob | null = null
+  let glyphPx = Math.max(12, Math.round(capBitmap.height * 0.12))
+  if (capCtx) {
+    capCtx.drawImage(capBitmap, 0, 0)
+    const capData = capCtx.getImageData(0, 0, capBitmap.width, capBitmap.height)
+    const capRows = []
+    for (let y = 0; y < capBitmap.height; y += 2) {
+      capRows.push(
+        measureRow(capData.data, capBitmap.width, y, 0, capBitmap.width),
+      )
+    }
+    const lines = captionLineBandsFromRows(capRows)
+    if (lines.title) {
+      glyphPx = Math.max(10, lines.title.height)
+      titleBand = await cropRect(
+        capBitmap,
+        0,
+        lines.title.y,
+        capBitmap.width,
+        lines.title.height,
+        1,
+      )
+    }
+    if (lines.footer) {
+      footerBand = await cropRect(
+        capBitmap,
+        0,
+        lines.footer.y,
+        capBitmap.width,
+        lines.footer.height,
+        1,
+      )
+    }
+  }
+  capBitmap.close()
+  bitmap.close()
+  return { caption, titleBand, footerBand, glyphPx }
+}
+
+/** Crop status bar + bottom tab bar from a Bloom map screenshot. */
+async function cropMapContent(image: File | Blob | string): Promise<Blob> {
+  const blob = await imageBlob(image)
+  if (typeof createImageBitmap === 'undefined' || typeof document === 'undefined') {
     return blob
   }
-  ctx.imageSmoothingEnabled = true
-  ctx.imageSmoothingQuality = 'high'
-  ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
-  bitmap.close()
-  return canvasToPng(canvas)
-}
-
-/** White-on-dark postcard text → dark-on-light for Tesseract English. */
-async function enhanceForLatinOcr(image: Blob): Promise<Blob> {
-  if (typeof createImageBitmap === 'undefined' || typeof document === 'undefined') {
-    return image
-  }
-  const bitmap = await createImageBitmap(image)
-  const canvas = document.createElement('canvas')
-  canvas.width = bitmap.width
-  canvas.height = bitmap.height
-  const ctx = canvas.getContext('2d', { willReadFrequently: true })
-  if (!ctx) {
-    bitmap.close()
-    return image
-  }
-  ctx.drawImage(bitmap, 0, 0)
-  bitmap.close()
-  const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height)
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i] ?? 0
-    const g = data[i + 1] ?? 0
-    const b = data[i + 2] ?? 0
-    // Invert luminance and stretch contrast so white glyphs become dark ink.
-    let lum = 255 - (r * 0.299 + g * 0.587 + b * 0.114)
-    lum = Math.max(0, Math.min(255, (lum - 40) * 1.55))
-    data[i] = lum
-    data[i + 1] = lum
-    data[i + 2] = lum
-  }
-  ctx.putImageData(new ImageData(data, width, height), 0, 0)
-  return canvasToPng(canvas)
-}
-
-/** Top of the caption is the bold place name — OCR it as a single line. */
-async function cropTitleLine(image: Blob): Promise<Blob> {
-  if (typeof createImageBitmap === 'undefined' || typeof document === 'undefined') {
-    return image
-  }
-  const bitmap = await createImageBitmap(image)
+  const bitmap = await createImageBitmap(blob)
   const w = bitmap.width
   const h = bitmap.height
   const sy = Math.floor(h * 0.08)
-  const sh = Math.max(24, Math.floor(h * 0.28))
-  const canvas = document.createElement('canvas')
-  const scale = 1.5
-  canvas.width = Math.max(1, Math.round(w * scale))
-  canvas.height = Math.max(1, Math.round(sh * scale))
-  const ctx = canvas.getContext('2d')
-  if (!ctx) {
-    bitmap.close()
-    return image
-  }
-  ctx.imageSmoothingEnabled = true
-  ctx.imageSmoothingQuality = 'high'
-  ctx.drawImage(bitmap, 0, sy, w, sh, 0, 0, canvas.width, canvas.height)
+  const sh = Math.floor(h * 0.78)
+  const out = await cropRect(bitmap, 0, sy, w, sh, 1)
   bitmap.close()
-  return canvasToPng(canvas)
+  return out
 }
 
-/** Bottom of the caption often holds "In X bei der Kirche" / distance lines. */
-async function cropFooterLines(image: Blob): Promise<Blob> {
-  if (typeof createImageBitmap === 'undefined' || typeof document === 'undefined') {
-    return image
+function voteTexts(parts: Array<{ text: string; confidence: number }>): string {
+  const scored = parts
+    .map((p) => ({
+      text: (p.text ?? '').replace(/\s+/g, ' ').trim(),
+      confidence: p.confidence,
+    }))
+    .filter((p) => p.text.length >= 2)
+  if (!scored.length) return ''
+  scored.sort(
+    (a, b) =>
+      b.confidence - a.confidence || b.text.length - a.text.length,
+  )
+  // Prefer a string that appears in more than one pass.
+  const counts = new Map<string, { n: number; conf: number }>()
+  for (const s of scored) {
+    const key = s.text.toLowerCase()
+    const cur = counts.get(key) ?? { n: 0, conf: 0 }
+    cur.n += 1
+    cur.conf = Math.max(cur.conf, s.confidence)
+    counts.set(key, cur)
   }
-  const bitmap = await createImageBitmap(image)
-  const w = bitmap.width
-  const h = bitmap.height
-  const sy = Math.floor(h * 0.45)
-  const sh = Math.max(24, h - sy)
-  const canvas = document.createElement('canvas')
-  const scale = 2
-  canvas.width = Math.max(1, Math.round(w * scale))
-  canvas.height = Math.max(1, Math.round(sh * scale))
-  const ctx = canvas.getContext('2d')
-  if (!ctx) {
-    bitmap.close()
-    return image
+  let bestKey = scored[0]!.text
+  let bestScore = -1
+  for (const [key, v] of counts) {
+    const score = v.n * 10 + v.conf
+    if (score > bestScore) {
+      bestScore = score
+      bestKey = scored.find((s) => s.text.toLowerCase() === key)?.text ?? key
+    }
   }
-  ctx.imageSmoothingEnabled = true
-  ctx.imageSmoothingQuality = 'high'
-  ctx.drawImage(bitmap, 0, sy, w, sh, 0, 0, canvas.width, canvas.height)
-  bitmap.close()
-  return canvasToPng(canvas)
+  return bestKey
 }
 
 export async function recognizeText(
@@ -236,100 +278,161 @@ export async function recognizeText(
   mode: OcrMode = 'postcard',
   langPref: OcrLangPref = 'auto',
 ): Promise<string> {
-  onProgress?.(15)
-  let target: Blob | File | string = image
-  if (mode === 'postcard') {
-    try {
-      target = await cropForPostcard(image)
-    } catch {
-      target = image
-    }
-  }
-  onProgress?.(35)
+  onProgress?.(10)
 
-  // One combined jpn+eng pass misreads Latin titles as kana. On the caption
-  // crop, read Japanese and English separately and let the parser choose.
   if (mode === 'postcard') {
-    const caption = target instanceof Blob ? target : await imageBlob(target)
-    // Still run eng so Latin address fragments survive; CJK/latin title
-    // preference is decided by langPref in the parser.
+    const parts = await cropPostcardParts(image)
+    onProgress?.(25)
     const runCjk = langPref !== 'en'
     let engText = ''
     let jpnText = ''
     let chiText = ''
 
-    {
-      const latinReady = await enhanceForLatinOcr(caption)
-      const titleBand = await cropTitleLine(latinReady)
-      const footerBand = await cropFooterLines(latinReady)
+    const latinCaption = await enhanceForLatinOcr(parts.caption)
+    const scaledCaption = await scaleToGlyphHeight(
+      latinCaption,
+      parts.glyphPx,
+      36,
+    )
+    onProgress?.(35)
 
-      // Skip eng single-line title for ja/zh — it invents junk like "an vere…".
-      let engTitleText = ''
-      if (langPref === 'auto' || langPref === 'en') {
-        const engTitleWorker = await withLang('eng', PSM.SINGLE_LINE, {
-          tessedit_char_whitelist: LATIN_WHITELIST,
-        })
-        const engTitle = await engTitleWorker.recognize(titleBand)
-        engTitleText = engTitle.data.text ?? ''
-      }
-      onProgress?.(runCjk ? 40 : 55)
+    const engVotes: Array<{ text: string; confidence: number }> = []
 
-      const engFullWorker = await withLang('eng', PSM.SINGLE_BLOCK, {
-        // Keep digits for the distance line; still block ampersand noise.
-        tessedit_char_whitelist: LATIN_WHITELIST + '0123456789,:/：',
+    if (parts.titleBand && (langPref === 'auto' || langPref === 'en')) {
+      const titleEnh = await enhanceForLatinOcr(parts.titleBand)
+      const titleScaled = await scaleToGlyphHeight(titleEnh, parts.glyphPx, 38)
+      const titleHit = await recognizeWith('eng', titleScaled, PSM.SINGLE_LINE, {
+        tessedit_char_whitelist: LATIN_WHITELIST,
       })
-      const engFull = await engFullWorker.recognize(latinReady)
-      onProgress?.(runCjk ? 55 : 80)
-
-      const engFooterWorker = await withLang('eng', PSM.SINGLE_BLOCK, {
-        tessedit_char_whitelist: LATIN_WHITELIST + '0123456789,:/：',
-      })
-      const engFooter = await engFooterWorker.recognize(footerBand)
-      engText = [engTitleText, engFull.data.text, engFooter.data.text]
-        .filter(Boolean)
-        .join('\n')
+      engVotes.push(titleHit)
     }
+
+    const fullHit = await recognizeWith('eng', scaledCaption, PSM.SINGLE_BLOCK, {
+      tessedit_char_whitelist: LATIN_WHITELIST + '0123456789,:/：',
+    })
+    engVotes.push(fullHit)
+    onProgress?.(50)
+
+    if (parts.footerBand) {
+      const footEnh = await enhanceForLatinOcr(parts.footerBand)
+      const footScaled = await scaleToGlyphHeight(
+        footEnh,
+        Math.max(10, parts.glyphPx * 0.7),
+        34,
+      )
+      // Norwegian ø etc. — eng alone often fails on "Kvaløya".
+      const footNor = await recognizeWith(
+        'eng+nor',
+        footScaled,
+        PSM.SINGLE_BLOCK,
+        { tessedit_char_whitelist: LATIN_WHITELIST + '0123456789,:/：' },
+      )
+      engVotes.push(footNor)
+      const footEng = await recognizeWith('eng', footScaled, PSM.SINGLE_BLOCK, {
+        tessedit_char_whitelist: LATIN_WHITELIST + '0123456789,:/：',
+      })
+      engVotes.push(footEng)
+    }
+    onProgress?.(65)
+
+    const votedTitle = voteTexts(engVotes)
+    engText = [votedTitle, ...engVotes.map((v) => v.text)]
+      .filter(Boolean)
+      .join('\n')
 
     if (runCjk) {
-      onProgress?.(70)
+      onProgress?.(75)
+      const cjkReady = await enhanceForCjkOcr(parts.caption)
+      const cjkScaled = await scaleToGlyphHeight(cjkReady, parts.glyphPx, 34)
+      const cjkVotes: Array<{ text: string; confidence: number }> = []
+      if (parts.titleBand) {
+        const titleCjk = await enhanceForCjkOcr(parts.titleBand)
+        const titleScaled = await scaleToGlyphHeight(
+          titleCjk,
+          parts.glyphPx,
+          36,
+        )
+        if (langPref === 'zh') {
+          cjkVotes.push(
+            await recognizeWith('chi', titleScaled, PSM.SINGLE_LINE),
+          )
+        } else {
+          cjkVotes.push(
+            await recognizeWith('jpn', titleScaled, PSM.SINGLE_LINE),
+          )
+        }
+      }
       if (langPref === 'zh') {
-        // Traditional Chinese first (app UI); + simplified for mixed screenshots.
-        const chiWorker = await withLang('chi_tra+chi_sim', PSM.SINGLE_BLOCK)
-        const chi = await chiWorker.recognize(caption)
-        chiText = chi.data.text ?? ''
+        cjkVotes.push(await recognizeWith('chi', cjkScaled, PSM.SINGLE_BLOCK))
+        chiText = [voteTexts(cjkVotes), ...cjkVotes.map((v) => v.text)]
+          .filter(Boolean)
+          .join('\n')
       } else {
-        // auto / ja
-        const jpnWorker = await withLang('jpn', PSM.SINGLE_BLOCK)
-        const jpn = await jpnWorker.recognize(caption)
-        jpnText = jpn.data.text ?? ''
+        cjkVotes.push(await recognizeWith('jpn', cjkScaled, PSM.SINGLE_BLOCK))
+        if (parts.footerBand) {
+          const footCjk = await enhanceForCjkOcr(parts.footerBand)
+          const footScaled = await scaleToGlyphHeight(
+            footCjk,
+            Math.max(10, parts.glyphPx * 0.7),
+            32,
+          )
+          cjkVotes.push(
+            await recognizeWith('jpn', footScaled, PSM.SINGLE_BLOCK),
+          )
+        }
+        jpnText = [voteTexts(cjkVotes), ...cjkVotes.map((v) => v.text)]
+          .filter(Boolean)
+          .join('\n')
+        // Consensus: if jpn also produces Latin-looking title, keep it.
+        if (/[A-Za-zÀ-ÿ]{4,}/.test(jpnText)) {
+          engText = `${engText}\n${jpnText}`
+        }
       }
     }
 
-    if (langPref === 'en' && !jpnText) {
-      jpnText = engText
-    }
-    // Parser already folds ---chi--- into CJK lines; keep jpn slot filled for zh
-    // so older tooling that only reads ---jpn--- still sees the text.
-    if (langPref === 'zh' && chiText && !jpnText) {
-      jpnText = chiText
-    }
+    if (langPref === 'en' && !jpnText) jpnText = engText
+    if (langPref === 'zh' && chiText && !jpnText) jpnText = chiText
 
     onProgress?.(100)
     return `---eng---\n${engText}\n---jpn---\n${jpnText}\n---chi---\n${chiText}`
   }
 
-  const mapLangs =
+  // Map / full-frame: crop chrome, scale, sparse text.
+  onProgress?.(30)
+  let target = await imageBlob(image)
+  try {
+    target = await cropMapContent(image)
+  } catch {
+    /* keep full */
+  }
+  const mapScaled = await scaleToGlyphHeight(target, 14, 32)
+  onProgress?.(55)
+
+  const mapKey: keyof typeof slots =
     langPref === 'ja'
       ? 'jpn'
-      : langPref === 'en'
-        ? 'eng'
-        : langPref === 'zh'
-          ? 'chi_tra+chi_sim'
-          : 'jpn+eng'
-  const worker = await withLang(mapLangs, PSM.AUTO)
-  const result = await worker.recognize(target)
+      : langPref === 'zh'
+        ? 'chi'
+        : langPref === 'en'
+          ? 'eng'
+          : 'eng'
+  const mapHit = await recognizeWith(
+    mapKey,
+    mapScaled,
+    // Sparse labels on a pale map.
+    PSM.SPARSE_TEXT,
+  )
+  onProgress?.(85)
+  let mapText = mapHit.text
+  // fi/fj OCR confusion for Nordic place names (Kaldfjord ↔ Kaldiford).
+  if (/\bfi\b|[A-Za-z]fi[a-z]/i.test(mapText)) {
+    mapText = `${mapText}\n${mapText.replace(/fi/gi, 'fj')}`
+  }
+  if (/\bfj\b|[A-Za-z]fj[a-z]/i.test(mapText)) {
+    mapText = `${mapText}\n${mapText.replace(/fj/gi, 'fi')}`
+  }
   onProgress?.(100)
-  return result.data.text ?? ''
+  return `---eng---\n${mapText}\n---jpn---\n${mapText}\n---chi---\n`
 }
 
 /** OCR several screenshots (postcard crop for first, full frame for rest/maps). */
@@ -357,9 +460,12 @@ export async function recognizeMany(
 }
 
 export async function terminateOcr(): Promise<void> {
-  if (!workerPromise) return
-  const w = await workerPromise
-  await w.terminate()
-  workerPromise = null
-  activeLangs = ''
+  for (const key of Object.keys(slots) as Array<keyof typeof slots>) {
+    const slot = slots[key]!
+    if (slot.worker) {
+      await slot.worker.terminate()
+      slot.worker = null
+      slot.loading = null
+    }
+  }
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { captionBandFromRows, type CaptionRow } from './captionCrop'
 import { formatCoords, parseCoordsText } from './coords'
+import { otsuThreshold } from './imageEnhance'
 import {
   expandPlaceQueries,
   nameMatchScore,
@@ -9,6 +10,7 @@ import {
   scoreGeocodeCandidate,
 } from './geocode'
 import {
+  consensusLatinTitles,
   extractLocalityFromHint,
   isCommemorativePhrase,
   isWeakLatinOcrTitle,
@@ -269,9 +271,43 @@ describe('caption band', () => {
     expect(band).not.toBeNull()
     expect(band!.y).toBeGreaterThanOrEqual(860)
     expect(band!.y).toBeLessThan(980)
-    // Include the full blue panel so smaller address lines are not clipped.
+    // End near the last text row — do not stretch into unrelated chrome.
     expect(band!.y + band!.height).toBeGreaterThan(1100)
-    expect(band!.y + band!.height).toBeLessThan(1280)
+    expect(band!.y + band!.height).toBeLessThan(1200)
+  })
+
+  it('prefers the purple caption card over textured blue sky (Kaldfjord)', () => {
+    const rows: CaptionRow[] = []
+    // Photo sky: blue-ish, almost every row textured → must be skipped.
+    for (let y = 708; y < 1024; y += 2) {
+      rows.push({ y, r: 76, g: 109, b: 157, contrast: 8 })
+    }
+    // Snow / building mid section
+    for (let y = 1024; y < 1450; y += 2) {
+      rows.push({ y, r: 200, g: 200, b: 205, contrast: 3 })
+    }
+    // Purple caption card: flat field + sparse text rows
+    for (let y = 1450; y < 1670; y += 2) {
+      const isText =
+        (y >= 1470 && y < 1510) || (y >= 1540 && y < 1580) || (y >= 1610 && y < 1640)
+      rows.push({
+        y,
+        r: 53,
+        g: 37,
+        b: 113,
+        contrast: isText ? 12 : 0.2,
+      })
+    }
+    // Page chrome below
+    for (let y = 1670; y < 1940; y += 2) {
+      rows.push({ y, r: 40, g: 30, b: 90, contrast: 0.1 })
+    }
+    const band = captionBandFromRows(rows, 2000)
+    expect(band).not.toBeNull()
+    expect(band!.y).toBeGreaterThanOrEqual(1440)
+    expect(band!.y).toBeLessThan(1480)
+    expect(band!.y + band!.height).toBeGreaterThan(1620)
+    expect(band!.y + band!.height).toBeLessThan(1700)
   })
 })
 
@@ -407,5 +443,56 @@ Kl&ster Plasy.
     expect(parsed.searchQueries.some((q) => /Klaster|Klášter/i.test(q))).toBe(
       true,
     )
+  })
+})
+
+describe('Kaldfjord Church postcard OCR/parse', () => {
+  const kaldfjordOcr = `---eng---
+Kaldfjord Church
+7,889,280mKvaløya
+Kaldfjord Church
+距離：7,889,280mKvaløya
+---jpn---
+Kaldfjord Church
+距離：7,889,280mKvaløya
+---chi---
+`
+
+  it('splits glued distance+place and keeps Kaldfjord Church title', () => {
+    const parsed = parseLocationFromOcr(kaldfjordOcr)
+    expect(parsed.title).toBe('Kaldfjord Church')
+    expect(parsed.address).toMatch(/Kval[øo]ya/i)
+    expect(parsed.searchQueries.some((q) => /Kaldfjord/i.test(q))).toBe(true)
+    expect(parsed.searchQueries.some((q) => /Kval/i.test(q))).toBe(true)
+  })
+
+  it('prefers eng+jpn consensus title over a weaker single-line guess', () => {
+    expect(
+      consensusLatinTitles(
+        ['Koldlord Church', 'Kaldfjord Church'],
+        ['Kaldfjord Church'],
+      ),
+    ).toContain('Kaldfjord Church')
+    const parsed = parseLocationFromOcr(`---eng---
+Koldlord Church
+Kaldfjord Church
+---jpn---
+Kaldfjord Church
+`)
+    expect(parsed.title).toBe('Kaldfjord Church')
+  })
+})
+
+describe('imageEnhance', () => {
+  it('computes an Otsu threshold that separates dark and light peaks', () => {
+    const lums = new Uint8Array(1000)
+    for (let i = 0; i < 500; i += 1) lums[i] = 30
+    for (let i = 500; i < 1000; i += 1) lums[i] = 200
+    const thr = otsuThreshold(lums)
+    expect(thr).toBeGreaterThanOrEqual(30)
+    expect(thr).toBeLessThan(200)
+    // Binarization with > thr keeps the two classes apart.
+    expect(30 > thr).toBe(false)
+    expect(200 > thr).toBe(true)
   })
 })

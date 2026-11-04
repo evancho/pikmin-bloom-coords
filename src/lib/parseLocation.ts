@@ -52,11 +52,16 @@ function extractAddressFromDistanceLine(line: string): string | null {
   )
   if (!m) {
     // English OCR often mangles 距離 into noise but keeps "123m Place".
+    // Also handle glued forms: "7,889,280mKvaløya".
     const eng = line.match(
-      /(?:^|[^\d])(?:[\d?]{1,3}[,，]?){1,4}\d{2,}\s*m\s*([A-Za-zÀ-ÿ].+)$/i,
+      /(?:^|[^\d])(?:[\d?]{1,3}[,，]?){1,4}\d{2,}\s*m\s*([A-Za-zÀ-ÿØøÅåÆæ].+)$/i,
     )
-    if (!eng) return null
-    return tidyAddressFragment(eng[1])
+    if (eng) return tidyAddressFragment(eng[1])
+    const glued = line.match(
+      /(?:[\d?]{1,3}[,，]?){1,4}\d{2,}m([A-Za-zÀ-ÿØøÅåÆæ][A-Za-zÀ-ÿØøÅåÆæ'’\-\s]{1,})$/i,
+    )
+    if (!glued) return null
+    return tidyAddressFragment(glued[1])
   }
   return tidyAddressFragment(m[1])
 }
@@ -203,8 +208,50 @@ export function scoreLatinTitle(line: string, indexInEngLines: number): number {
   return score
 }
 
-function pickBestLatinTitle(engLines: string[], extras: string[]): string | null {
+/**
+ * Titles that both the English block OCR and the Japanese pass agree on beat
+ * a lone single-line title crop (e.g. both read "Kaldfjord Church").
+ */
+export function consensusLatinTitles(
+  engLines: string[],
+  otherLines: string[],
+): string[] {
+  const normalize = (s: string) =>
+    tidyLine(s)
+      .replace(/\.+$/, '')
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+  const engSet = new Set(
+    engLines
+      .filter(looksLikeLatinName)
+      .map((l) => normalize(l)),
+  )
+  const out: string[] = []
+  for (const line of otherLines) {
+    if (!looksLikeLatinName(line)) continue
+    const key = normalize(line)
+    if (engSet.has(key)) {
+      const tidy = tidyLine(line).replace(/\.+$/, '')
+      if (!out.some((o) => normalize(o) === key)) out.push(tidy)
+    }
+  }
+  return out
+}
+
+function pickBestLatinTitle(
+  engLines: string[],
+  extras: string[],
+  consensus: string[] = [],
+): string | null {
   const scored: Array<{ line: string; score: number }> = []
+  // Consensus across OCR passes wins over any single-line title guess.
+  for (const line of consensus) {
+    if (!looksLikeLatinName(line)) continue
+    scored.push({
+      line: tidyLine(line).replace(/\.+$/, ''),
+      score: scoreLatinTitle(line, 0) + 20,
+    })
+  }
   engLines.forEach((line, i) => {
     if (!looksLikeLatinName(line)) return
     scored.push({
@@ -376,14 +423,20 @@ export function parseLocationFromOcr(
   const hintLocality =
     lines.map(extractLocalityFromHint).find((x): x is string => Boolean(x)) ??
     null
+  const jpnChiLines = linesFrom(`${passes.jpn}\n${passes.chi}`)
+  const consensus = samePass
+    ? []
+    : consensusLatinTitles(engLines, jpnChiLines)
   let latinTitle = pickBestLatinTitle(
     latinSourceLines,
     latinNameCandidates(samePass ? normalized : normalizeOcrText(passes.eng)),
+    consensus,
   )
   if (!latinTitle && !samePass) {
     latinTitle = pickBestLatinTitle(
-      linesFrom(`${passes.jpn}\n${passes.chi}`),
+      jpnChiLines,
       latinNameCandidates(normalizeOcrText(`${passes.jpn}\n${passes.chi}`)),
+      consensus,
     )
   }
   // Caption locality ("In Bad Berka bei der Kirche") beats memorial titles.
@@ -474,7 +527,7 @@ export function parseLocationFromOcr(
   // Don't append 日本 or a garbled CJK translation ahead of them.
   if (title && looksLikeLatinName(title) && !hasCjk(title)) {
     const latinAddress =
-      address && /[A-Za-zÀ-ÿ]{3,}/.test(address) ? address : null
+      address && /[A-Za-zÀ-ÿØøÅåÆæ]{3,}/.test(address) ? address : null
     // Town / landmark name first — "Bad Berka Kirche" alone often hits a street.
     for (const q of expandPlaceQueries(title, latinAddress)) push(q)
     // "bei der Kirche" → bias toward the parish church in that town.
@@ -486,6 +539,12 @@ export function parseLocationFromOcr(
       push(`Kirche ${title}`)
     }
     if (hintLocality && hintLocality !== title) push(hintLocality)
+    // fi/fj OCR confusion (Kaldfjord ↔ Kaldiford) — retry both spellings.
+    const latinSnapshot = [...searchQueries]
+    for (const q of latinSnapshot) {
+      if (/fi/i.test(q)) push(q.replace(/fi/gi, 'fj'))
+      if (/fj/i.test(q)) push(q.replace(/fj/gi, 'fi'))
+    }
     // Recover OCR-mangled local names (Kl&ster Plasy → Klaster / Klášter Plasy)
     // as extra queries; they often match OSM landmarks better than "Konvent …".
     for (const line of engLines) {
@@ -525,8 +584,13 @@ export function parseLocationFromOcr(
       push(label)
     }
     if (title && hasCjk(title)) {
-      push(`${title} 大分`)
+      // Only bias 大分 when the address/OCR already points there — no global Kyushu default.
+      const oitaHint =
+        /大分|佐伯|浅海井|上浦|津久見|日代/.test(normalized) ||
+        (address != null && /大分|佐伯|浅海井|上浦/.test(address))
+      if (oitaHint) push(`${title} 大分`)
       push(`${title} 日本`)
+      for (const q of expandPlaceQueries(title, address)) push(q)
     }
     if (title) {
       // bare title last — many homonyms
@@ -549,6 +613,12 @@ export function localityHints(parsed: ParsedLocation): string[] {
     .filter(Boolean)
     .join(' ')
   const hints: string[] = []
+  const pushHint = (h: string | null | undefined) => {
+    const t = (h ?? '').trim()
+    if (t.length < 2) return
+    if (!hints.some((x) => x.toLowerCase() === t.toLowerCase())) hints.push(t)
+  }
+  // Only add Japanese region tokens that actually appear in OCR/address.
   for (const h of [
     '佐伯',
     '浅海井',
@@ -559,9 +629,13 @@ export function localityHints(parsed: ParsedLocation): string[] {
     '暁風',
     '日代',
     '津久見',
+    '京都',
+    '東京',
+    '大阪',
+    '北海道',
   ]) {
     if (blob.includes(h) || parsed.searchQueries.some((q) => q.includes(h))) {
-      hints.push(h)
+      pushHint(h)
     }
   }
   // Latin locality token from the title ("Plasy" in "Konvent Plasy").
@@ -569,22 +643,38 @@ export function localityHints(parsed: ParsedLocation): string[] {
     const parts = parsed.title.split(/\s+/).filter(Boolean)
     if (parts.length >= 2) {
       const last = parts[parts.length - 1]!
-      if (last.length >= 3 && !hints.includes(last)) hints.push(last)
+      // Skip generic landmark words ("Church", "Lake").
+      if (
+        last.length >= 3 &&
+        !/^(church|kirche|kirke|kyrka|chapel|lake|park|museum|castle|temple|shrine)$/i.test(
+          last,
+        )
+      ) {
+        pushHint(last)
+      }
       // Keep full multi-word towns ("Bad Berka") for geocode ranking.
-      if (!hints.includes(parsed.title)) hints.push(parsed.title)
+      pushHint(parsed.title)
+      // Bare stem without landmark suffix ("Kaldfjord Church" → "Kaldfjord").
+      const stem = parsed.title
+        .replace(
+          /\s+(Church|Kirche|Kirke|Kyrka|Kirkko|Chapel|Cathedral|Museum|Castle|Temple|Shrine|Park|Lake|Tower|Station)$/i,
+          '',
+        )
+        .trim()
+      if (stem.length >= 3 && stem !== parsed.title) pushHint(stem)
     }
   }
   for (const q of parsed.searchQueries) {
-    const fromHint = extractLocalityFromHint(q)
-    if (fromHint && !hints.includes(fromHint)) hints.push(fromHint)
+    pushHint(extractLocalityFromHint(q))
   }
   for (const line of (parsed.rawText ?? '').split(/\n/)) {
-    const fromHint = extractLocalityFromHint(line)
-    if (fromHint && !hints.includes(fromHint)) hints.push(fromHint)
+    pushHint(extractLocalityFromHint(line))
   }
-  if (parsed.address && /^[A-Za-zÀ-ÿ]/.test(parsed.address)) {
-    const token = parsed.address.split(/\s+/)[0]!
-    if (token.length >= 3 && !hints.includes(token)) hints.push(token)
+  if (parsed.address && /^[A-Za-zÀ-ÿØøÅåÆæ]/.test(parsed.address)) {
+    // Keep each Latin address token (Kvaløya, Tromsø, …).
+    for (const token of parsed.address.split(/[\s,，]+/).filter(Boolean)) {
+      if (token.length >= 3) pushHint(token)
+    }
   }
   return hints
 }
