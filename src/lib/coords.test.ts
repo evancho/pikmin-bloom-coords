@@ -564,6 +564,36 @@ Bielice
   })
 })
 
+describe('Table for Giants postcard', () => {
+  const ocr = `---eng---
+Table tor Giants
+Table tor Giants
+Table for Giants
+FEE 12,524,963mTheewaterskloof Rural
+An eye-catching display at Dassiesfontein.
+---jpn---
+Table for Giaqntis
+距離・12,524,963mTheewaiterskloof Rural
+An eye-catching display at Dassiesfontein.
+---chi---
+`
+
+  it('keeps the title and searches Dassiesfontein in Theewaterskloof', () => {
+    const parsed = parseLocationFromOcr(ocr)
+    expect(parsed.title).toBe('Table for Giants')
+    expect(parsed.address).toMatch(/Theewaterskloof/)
+    expect(parsed.description).toMatch(/Dassiesfontein/)
+    expect(parsed.searchQueries[0]).toBe('Table for Giants Dassiesfontein')
+    expect(parsed.searchQueries).toContain('Dassiesfontein Theewaterskloof')
+    const hints = localityHints(parsed)
+    expect(hints).toContain('Dassiesfontein')
+    expect(hints).toContain('Theewaterskloof')
+    expect(hints).not.toContain('Rural')
+    expect(regionBiasFromHints(hints)?.label).toBe('theewaterskloof')
+    expect(regionBiasFromHints(hints)?.countrycodes).toBe('za')
+  })
+})
+
 describe('imageEnhance', () => {
   it('computes an Otsu threshold that separates dark and light peaks', () => {
     const lums = new Uint8Array(1000)

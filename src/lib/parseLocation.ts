@@ -78,7 +78,12 @@ function pickBestDistanceAddress(lines: string[]): string | null {
     s += found.filter((f) => f.toLowerCase() === key).length
     return s
   }
-  return [...found].sort((a, b) => score(b) - score(a) || b.length - a.length)[0] ?? null
+  // Same score: keep the earlier reading (English pass is listed first).
+  return (
+    [...found].sort(
+      (a, b) => score(b) - score(a) || found.indexOf(a) - found.indexOf(b),
+    )[0] ?? null
+  )
 }
 
 function tidyAddressFragment(raw: string | undefined): string | null {
@@ -163,6 +168,23 @@ export function isCommemorativePhrase(line: string): boolean {
   return false
 }
 
+/** Caption sentences ("An eye-catching display at Dassiesfontein") are not titles. */
+export function isCaptionSentence(line: string): boolean {
+  const t = tidyLine(line).replace(/\.+$/, '')
+  if (/^An\s+/i.test(t) && /\bat\s+[A-ZÀ-Ý]/.test(t)) return true
+  if (/\b(eye-catching|display at|located at)\b/i.test(t)) return true
+  return false
+}
+
+/** "… at Dassiesfontein." → "Dassiesfontein" */
+export function extractAtPlace(line: string): string | null {
+  const m = tidyLine(line).match(/\bat\s+([A-ZÀ-Ý][a-zà-ÿā-ž]{3,})/)
+  if (!m) return null
+  const place = m[1]!
+  if (/^(the|this|that|night|home|last|least)$/i.test(place)) return null
+  return place
+}
+
 /** "In Bad Berka bei der Kirche" → "Bad Berka" */
 export function extractLocalityFromHint(line: string): string | null {
   const cleaned = tidyLine(line)
@@ -187,6 +209,7 @@ export function looksLikeLatinName(line: string): boolean {
   if (/[&@#%^*_+=<>{}[\]|\\]/.test(t)) return false
   if (isUiChrome(t)) return false
   if (isCommemorativePhrase(t)) return false
+  if (isCaptionSentence(t)) return false
   if (isWeakLatinOcrTitle(t)) return false
   // Prepositional captions are locality hints, not the place title itself.
   if (/^(In|Near|At|By)\s+/i.test(t) && /\sbei\b/i.test(t)) return false
@@ -279,6 +302,8 @@ export function canonLatinKey(s: string): string {
     .toLowerCase()
     .replace(/fji/g, 'fj')
     .replace(/fi/g, 'fj')
+    // "Table tor Giants" is the usual f→t miss of "for".
+    .replace(/\btor\b/g, 'for')
     .replace(/\s+/g, ' ')
     .trim()
 }
@@ -290,7 +315,13 @@ function pickBestLatinTitle(
 ): string | null {
   type Group = { n: number; line: string; score: number }
   const groups = new Map<string, Group>()
-  const isCleanFj = (s: string) => /fj/i.test(s) && !/fji/i.test(s)
+  const spellScore = (s: string) => {
+    let n = 0
+    if (/fj/i.test(s) && !/fji/i.test(s)) n += 2
+    if (/\bfor\b/i.test(s)) n += 2
+    if (/\btor\b/i.test(s)) n -= 1
+    return n
+  }
   const consider = (line: string, score: number) => {
     if (!looksLikeLatinName(line)) return
     const tidy = tidyLine(line).replace(/\.+$/, '')
@@ -298,8 +329,8 @@ function pickBestLatinTitle(
     const cur = groups.get(key) ?? { n: 0, line: tidy, score: -Infinity }
     cur.n += 1
     cur.score = Math.max(cur.score, score)
-    // Inside one fi/fj cluster, keep the fj spelling (Kaldfjord over Kaldfiord).
-    if (isCleanFj(tidy) && !isCleanFj(cur.line)) cur.line = tidy
+    // Prefer fj over fi, and "for" over the f→t miss "tor".
+    if (spellScore(tidy) > spellScore(cur.line)) cur.line = tidy
     groups.set(key, cur)
   }
   // Same reading on eng + jpn beats a one-off single-line crop.
@@ -521,6 +552,8 @@ export function parseLocationFromOcr(
   const hintLocality =
     lines.map(extractLocalityFromHint).find((x): x is string => Boolean(x)) ??
     null
+  const atPlace =
+    lines.map(extractAtPlace).find((x): x is string => Boolean(x)) ?? null
   const jpnChiLines = linesFrom(`${passes.jpn}\n${passes.chi}`)
   const consensus = samePass
     ? []
@@ -594,7 +627,9 @@ export function parseLocationFromOcr(
         l !== title &&
         l !== address &&
         scoreTitle(l) >= -2,
-    ) ?? null
+    ) ??
+    lines.find((l) => isCaptionSentence(l) && l !== title) ??
+    null
 
   const placeLabels = cjkLines.filter((l) => {
     if (l === title || l === address || l === description) return false
@@ -632,6 +667,13 @@ export function parseLocationFromOcr(
     const latinAddress =
       address && /[A-Za-zÀ-ÿØøÅåÆæ]{3,}/.test(address) ? address : null
     // Town / landmark name first — "Bad Berka Kirche" alone often hits a street.
+    // "at Dassiesfontein" is the landmark; the distance line is only the municipality.
+    if (atPlace && atPlace !== title) {
+      push(`${title} ${atPlace}`)
+      const admin = (latinAddress ?? '').replace(/\bRural\b/gi, '').trim()
+      if (admin) push(`${atPlace} ${admin}`)
+      push(atPlace)
+    }
     for (const q of expandPlaceQueries(title, latinAddress)) push(q)
     // German "bei der Kirche" only — an English "Church" title should not
     // emit Stadtkirche queries (those drown Nordic kirke lookups).
@@ -777,8 +819,19 @@ export function localityHints(parsed: ParsedLocation): string[] {
   if (parsed.address && /^[A-Za-zÀ-ÿØøÅåÆæ]/.test(parsed.address)) {
     // Keep each Latin address token (Kvaløya, Tromsø, …).
     for (const token of parsed.address.split(/[\s,，]+/).filter(Boolean)) {
-      if (token.length >= 3) pushHint(token)
+      if (token.length < 3) continue
+      if (
+        /^(rural|local|ward|district|municipality|county|province|region|prefecture)$/i.test(
+          token,
+        )
+      ) {
+        continue
+      }
+      pushHint(token)
     }
+  }
+  for (const line of (parsed.rawText ?? '').split(/\n/)) {
+    pushHint(extractAtPlace(line))
   }
   return hints
 }

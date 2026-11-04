@@ -73,6 +73,12 @@ const REGION_BOXES: Array<{
     countrycodes: 'jp',
   },
   {
+    match: /Theewaterskloof|Theewaiterskloof/i,
+    label: 'theewaterskloof',
+    viewbox: { south: -34.55, north: -33.85, west: 18.95, east: 19.75 },
+    countrycodes: 'za',
+  },
+  {
     match: /Kożuch|Kozuchow|科祖/,
     label: 'kozuchow',
     viewbox: { south: 51.55, north: 51.9, west: 15.4, east: 15.9 },
