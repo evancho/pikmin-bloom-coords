@@ -155,7 +155,7 @@ async function cropPostcardParts(
   const x1 = Math.floor(w * 0.9)
   // Include lower purple cards (Kaldfjord ~0.72–0.84 of frame).
   const yStart = Math.floor(h * 0.25)
-  const yEnd = Math.floor(h * 0.92)
+  const yEnd = Math.floor(h * 0.98)
   const region = sampleCtx.getImageData(0, 0, w, h)
   const rows = []
   for (let y = yStart; y < yEnd; y += 2) {
@@ -354,7 +354,7 @@ export async function recognizeText(
     if (runCjk) {
       onProgress?.(75)
       const cjkReady = await enhanceForCjkOcr(parts.caption)
-      const cjkScaled = await scaleToGlyphHeight(cjkReady, parts.glyphPx, 34)
+      const cjkScaled = await scaleToGlyphHeight(cjkReady, parts.glyphPx, 34, 2.5)
       const cjkVotes: Array<{ text: string; confidence: number }> = []
       if (parts.titleBand) {
         const titleCjk = await enhanceForCjkOcr(parts.titleBand)
@@ -362,6 +362,7 @@ export async function recognizeText(
           titleCjk,
           parts.glyphPx,
           36,
+          2.5,
         )
         if (langPref === 'zh') {
           cjkVotes.push(
@@ -386,6 +387,7 @@ export async function recognizeText(
             footCjk,
             Math.max(10, parts.glyphPx * 0.7),
             32,
+            2.5,
           )
           cjkVotes.push(
             await recognizeWith('jpn', footScaled, PSM.SINGLE_BLOCK),

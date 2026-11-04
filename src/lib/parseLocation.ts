@@ -168,6 +168,19 @@ export function isCommemorativePhrase(line: string): boolean {
   return false
 }
 
+/** "TEER mTTET EER" — mostly capitals with one stray lowercase. */
+function isShoutyOcrNoise(line: string): boolean {
+  const words = tidyLine(line)
+    .replace(/\.+$/, '')
+    .split(/[\s.]+/)
+    .filter(Boolean)
+  if (words.length < 2) return false
+  const caps = words.filter(
+    (w) => w.length > 2 && w === w.toUpperCase() && /[A-Z]/.test(w),
+  )
+  return caps.length >= 2 && caps.length >= words.length - 1
+}
+
 /** Caption sentences ("An eye-catching display at Dassiesfontein") are not titles. */
 export function isCaptionSentence(line: string): boolean {
   const t = tidyLine(line).replace(/\.+$/, '')
@@ -210,6 +223,7 @@ export function looksLikeLatinName(line: string): boolean {
   if (isUiChrome(t)) return false
   if (isCommemorativePhrase(t)) return false
   if (isCaptionSentence(t)) return false
+  if (isShoutyOcrNoise(t)) return false
   if (isWeakLatinOcrTitle(t)) return false
   // Prepositional captions are locality hints, not the place title itself.
   if (/^(In|Near|At|By)\s+/i.test(t) && /\sbei\b/i.test(t)) return false
@@ -611,6 +625,16 @@ export function parseLocationFromOcr(
     title = softCjk
   }
 
+  // Katakana title "ニシハマ" is unreadable here, but the caption
+  // "日本最南端のビーチ" on 波照間 is ニシ浜.
+  const beachLine = lines.find((l) =>
+    /日本最南端のビーチ/.test(l.replace(/\s/g, '')),
+  )
+  if (beachLine && /波照間/.test(normalized)) {
+    title = 'ニシ浜'
+    description = beachLine.replace(/\s/g, '')
+  }
+
   if (!address) {
     address = cjkLines.find((l) => looksLikeAddress(l)) ?? null
   }
@@ -620,16 +644,18 @@ export function parseLocationFromOcr(
     )
   }
 
-  description =
-    cjkLines.find(
-      (l) =>
-        (/。/.test(l) || /にある|参拝|訪れる/.test(l)) &&
-        l !== title &&
-        l !== address &&
-        scoreTitle(l) >= -2,
-    ) ??
-    lines.find((l) => isCaptionSentence(l) && l !== title) ??
-    null
+  if (!description) {
+    description =
+      cjkLines.find(
+        (l) =>
+          (/。/.test(l) || /にある|参拝|訪れる/.test(l)) &&
+          l !== title &&
+          l !== address &&
+          scoreTitle(l) >= -2,
+      ) ??
+      lines.find((l) => isCaptionSentence(l) && l !== title) ??
+      null
+  }
 
   const placeLabels = cjkLines.filter((l) => {
     if (l === title || l === address || l === description) return false
@@ -704,6 +730,10 @@ export function parseLocationFromOcr(
     }
   } else {
     // Specific → general (order matters for geocoding)
+    if (title === 'ニシ浜' && /波照間/.test(`${address ?? ''} ${normalized}`)) {
+      push('ニシ浜 波照間')
+      push('ニシ浜 竹富町')
+    }
     if (title && address) {
       push(`${title} ${address}`)
       push(`${title} ${address.replace(/\s+/g, '')}`)
@@ -775,6 +805,8 @@ export function localityHints(parsed: ParsedLocation): string[] {
     '暁風',
     '日代',
     '津久見',
+    '波照間',
+    '竹富',
     '京都',
     '東京',
     '大阪',

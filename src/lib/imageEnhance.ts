@@ -93,7 +93,10 @@ export async function enhanceForLatinOcr(image: Blob): Promise<Blob> {
   return canvasToPng(canvas)
 }
 
-/** Grayscale + contrast stretch for Japanese / CJK caption OCR. */
+/**
+ * Postcard captions are light glyphs on a blue/purple field.
+ * Invert, then stretch, so Tesseract sees dark text on white.
+ */
 export async function enhanceForCjkOcr(image: Blob): Promise<Blob> {
   const loaded = await blobToImageData(image)
   if (!loaded) return image
@@ -105,7 +108,7 @@ export async function enhanceForCjkOcr(image: Blob): Promise<Blob> {
     const r = data.data[i] ?? 0
     const g = data.data[i + 1] ?? 0
     const b = data.data[i + 2] ?? 0
-    const lum = Math.round(r * 0.299 + g * 0.587 + b * 0.114)
+    const lum = 255 - Math.round(r * 0.299 + g * 0.587 + b * 0.114)
     lums[p] = lum
     if (lum < min) min = lum
     if (lum > max) max = lum
@@ -131,12 +134,13 @@ export async function scaleToGlyphHeight(
   image: Blob,
   estimatedGlyphPx: number,
   targetPx = 36,
+  minScale = 1.2,
 ): Promise<Blob> {
   if (typeof createImageBitmap === 'undefined' || typeof document === 'undefined') {
     return image
   }
   const glyph = Math.max(8, estimatedGlyphPx)
-  const scale = Math.min(3.5, Math.max(1.2, targetPx / glyph))
+  const scale = Math.min(3.5, Math.max(minScale, targetPx / glyph))
   if (Math.abs(scale - 1) < 0.15) return image
   const bitmap = await createImageBitmap(image)
   const canvas = document.createElement('canvas')

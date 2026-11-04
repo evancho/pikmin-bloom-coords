@@ -102,9 +102,11 @@ export function captionBandFromRows(
   scored.sort((a, b) => b.score - a.score || b.text.length - a.text.length)
   const best = scored[0]!
 
-  // Start at the first flat row of the card (skip leftover photo fringe).
+  // Start at the first flat row that is still above the title. A flat row
+  // after the title is the gap between lines, not the top of the card.
   let startIdx = best.start
-  for (let k = best.start; k <= best.end; k += 1) {
+  const firstText = best.text[0]!
+  for (let k = best.start; k <= firstText; k += 1) {
     if (rows[k]!.contrast < 1) {
       startIdx = k
       break

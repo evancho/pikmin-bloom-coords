@@ -73,6 +73,12 @@ const REGION_BOXES: Array<{
     countrycodes: 'jp',
   },
   {
+    match: /波照間|竹富/,
+    label: 'hateruma',
+    viewbox: { south: 24.0, north: 24.6, west: 123.4, east: 124.3 },
+    countrycodes: 'jp',
+  },
+  {
     match: /Theewaterskloof|Theewaiterskloof/i,
     label: 'theewaterskloof',
     viewbox: { south: -34.55, north: -33.85, west: 18.95, east: 19.75 },
@@ -192,7 +198,7 @@ export function expandPlaceQueries(
   // Japanese landmark stem + locality (神社／寺／城…).
   if (JP_LANDMARK_SUFFIX.test(title)) {
     const stem = title.replace(JP_LANDMARK_SUFFIX, '').trim()
-    if (stem.length >= 1) {
+    if (stem.length >= 2 && !/^[\u30a0-\u30ff]{1,3}$/.test(stem)) {
       push(stem)
       if (locality) {
         push(`${title} ${locality}`)

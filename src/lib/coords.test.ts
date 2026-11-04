@@ -594,6 +594,29 @@ An eye-catching display at Dassiesfontein.
   })
 })
 
+describe('Nishihama beach postcard', () => {
+  const ocr = `---eng---
+TEER . mTTET EER
+FEB : 379,779mT ERT KERR
+---jpn---
+距離 : 379.779m竹富町 波照間
+近メいる
+日本最南端のビーチ
+日太最南端のビーチ
+---chi---
+`
+
+  it('maps the southernmost beach caption to ニシ浜 on Hateruma', () => {
+    const parsed = parseLocationFromOcr(ocr)
+    expect(parsed.title).toBe('ニシ浜')
+    expect(parsed.address).toMatch(/波照間/)
+    expect(parsed.description).toBe('日本最南端のビーチ')
+    expect(parsed.searchQueries[0]).toBe('ニシ浜 波照間')
+    expect(parsed.title).not.toMatch(/TEER|近メ/)
+    expect(regionBiasFromHints(localityHints(parsed))?.label).toBe('hateruma')
+  })
+})
+
 describe('imageEnhance', () => {
   it('computes an Otsu threshold that separates dark and light peaks', () => {
     const lums = new Uint8Array(1000)
