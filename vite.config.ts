@@ -6,7 +6,7 @@ import { defineConfig } from 'vitest/config'
 import { VitePWA } from 'vite-plugin-pwa'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const APP_BUILD = 'v1.2.7-update'
+const APP_BUILD = 'v1.3.0'
 
 /** GitHub Pages: https://evancho.github.io/pikmin-bloom-coords/ */
 const GH_PAGES_BASE = '/pikmin-bloom-coords/'
@@ -70,7 +70,7 @@ export default defineConfig(({ command }) => ({
       workbox: {
         // New cache name so installs still on the autoUpdate precache pick up
         // this prompt-banner build once, then wait for the in-app reload.
-        cacheId: 'bloom-pin-v1.2.7',
+        cacheId: 'bloom-pin-v1.3.0',
         skipWaiting: false,
         clientsClaim: true,
         cleanupOutdatedCaches: true,

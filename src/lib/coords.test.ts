@@ -4,9 +4,14 @@ import { formatCoords, parseCoordsText } from './coords'
 import { otsuThreshold } from './imageEnhance'
 import {
   expandPlaceQueries,
+  inferPrecision,
+  localityConsistencyScore,
+  markSuspicious,
   nameMatchScore,
   poiTypeScore,
   queryPrefersJapan,
+  regionBiasFromHints,
+  scoreAgainstQueries,
   scoreGeocodeCandidate,
 } from './geocode'
 import {
@@ -14,6 +19,7 @@ import {
   extractLocalityFromHint,
   isCommemorativePhrase,
   isWeakLatinOcrTitle,
+  localityHints,
   mergeParsedLocations,
   parseLocationFromOcr,
 } from './parseLocation'
@@ -462,7 +468,7 @@ Kaldfjord Church
     const parsed = parseLocationFromOcr(kaldfjordOcr)
     expect(parsed.title).toBe('Kaldfjord Church')
     expect(parsed.address).toMatch(/Kval[øo]ya/i)
-    expect(parsed.searchQueries.some((q) => /Kaldfjord/i.test(q))).toBe(true)
+    expect(parsed.searchQueries).toContain('Kaldfjord kirke')
     expect(parsed.searchQueries.some((q) => /Kval/i.test(q))).toBe(true)
   })
 
@@ -494,5 +500,133 @@ describe('imageEnhance', () => {
     // Binarization with > thr keeps the two classes apart.
     expect(30 > thr).toBe(false)
     expect(200 > thr).toBe(true)
+  })
+})
+
+describe('geocode precision and Kaldfjord ranking', () => {
+  it('expands Nordic kirke queries and locality combos', () => {
+    const qs = expandPlaceQueries('Kaldfjord Church', 'Kvaløya')
+    expect(qs).toContain('Kaldfjord kirke')
+    expect(qs).toContain('Kaldfjord Church Kvaløya')
+    expect(qs).toContain('Kaldfjord')
+  })
+
+  it('ranks Tromsø / Kvaløy church above Guernsey Church Lane', () => {
+    const hints = localityHints(
+      parseLocationFromOcr(`---eng---
+Kaldfjord Church
+距離：7,889,280mKvaløya
+---jpn---
+Kaldfjord Church
+`),
+    )
+    expect(hints.some((h) => /Kval/i.test(h))).toBe(true)
+    const region = regionBiasFromHints(hints)
+    expect(region?.label).toBe('tromso')
+
+    const guernsey = {
+      displayName: 'Church Lane, St Peter Port, Guernsey',
+      lat: 49.455,
+      lng: -2.536,
+      importance: 0.4,
+      className: 'highway',
+      typeName: 'residential',
+    }
+    const kvaloy = {
+      displayName: 'Kvaløy kirke, Kaldfjord, Tromsø, Troms, Norge',
+      lat: 69.6806,
+      lng: 18.7442,
+      importance: 0.35,
+      className: 'amenity',
+      typeName: 'place_of_worship',
+    }
+    const queries = expandPlaceQueries('Kaldfjord Church', 'Kvaløya')
+    expect(
+      scoreAgainstQueries(kvaloy, queries, hints, region),
+    ).toBeGreaterThan(scoreAgainstQueries(guernsey, queries, hints, region))
+  })
+
+  it('does not boost Kyushu for unrelated Latin places', () => {
+    expect(regionBiasFromHints(['Kaldfjord', 'Kvaløya'])?.label).not.toBe(
+      'oita',
+    )
+    const plasyRegion = regionBiasFromHints(['Plasy'])
+    const inPlasy = scoreGeocodeCandidate(
+      {
+        displayName: 'Klášter Plasy, Plasy, Česko',
+        lat: 49.935,
+        lng: 13.39,
+        importance: 0.5,
+        className: 'amenity',
+        typeName: 'monastery',
+      },
+      'Klášter Plasy',
+      ['Plasy'],
+      plasyRegion,
+    )
+    const oitaHit = scoreGeocodeCandidate(
+      {
+        displayName: 'Somewhere, 大分県, Japan',
+        lat: 33.2,
+        lng: 131.6,
+        importance: 0.5,
+        className: 'place',
+        typeName: 'city',
+      },
+      'Klášter Plasy',
+      ['Plasy'],
+      plasyRegion,
+    )
+    expect(inPlasy).toBeGreaterThan(oitaHit)
+    expect(
+      regionBiasFromHints(['Gemeentehuis', 'Oud-Turnhout'])?.label,
+    ).not.toBe('oita')
+  })
+
+  it('marks Open-Meteo-style hits as locality precision', () => {
+    expect(inferPrecision('place', 'locality')).toBe('locality')
+    expect(inferPrecision('amenity', 'place_of_worship')).toBe('landmark')
+    expect(inferPrecision('highway', 'residential')).toBe('street')
+  })
+
+  it('flags far-away candidates as suspicious', () => {
+    const region = regionBiasFromHints(['Kaldfjord', 'Kvaløya', 'Tromsø'])
+    const marked = markSuspicious(
+      [
+        {
+          displayName: 'Kvaløy kirke, Tromsø, Norge',
+          lat: 69.6806,
+          lng: 18.7442,
+          className: 'amenity',
+          typeName: 'place_of_worship',
+        },
+        {
+          displayName: 'Church Lane, Guernsey',
+          lat: 49.455,
+          lng: -2.536,
+          className: 'highway',
+          typeName: 'residential',
+        },
+      ],
+      region,
+      ['Kvaløya', 'Tromsø', 'Kaldfjord'],
+    )
+    expect(marked[0]?.suspicious).toBeFalsy()
+    expect(marked[1]?.suspicious).toBe(true)
+  })
+
+  it('penalizes display_name that lacks parsed locality', () => {
+    expect(
+      localityConsistencyScore('Church Lane, Guernsey', [
+        'Kvaløya',
+        'Kaldfjord',
+      ]),
+    ).toBeLessThan(0)
+    expect(
+      localityConsistencyScore('Kvaløy kirke, Kaldfjord, Tromsø', [
+        'Kvaløya',
+        'Kaldfjord',
+      ]),
+    ).toBeGreaterThan(0)
   })
 })

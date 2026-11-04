@@ -142,7 +142,15 @@ export default function App() {
       )
       if (ac.signal.aborted) return
 
-      const best = candidates[0]
+      const best = candidates.find((c) => !c.suspicious) ?? candidates[0]
+      const precisionNote =
+        best?.precision === 'locality'
+          ? '（城鎮中心點，請確認）'
+          : best?.precision === 'street'
+            ? '（街道等級，請確認）'
+            : best?.suspicious
+              ? '（位置可疑，請確認）'
+              : ''
       setWork((w) => ({
         ...w,
         candidates,
@@ -151,7 +159,7 @@ export default function App() {
         coordsText: best ? formatCoords(best.lat, best.lng) : '',
         status: 'ready',
         statusMessage: best
-          ? `已用 ${files.length} 張截圖找到 ${candidates.length} 個候選，可編輯後歸檔`
+          ? `已用 ${files.length} 張截圖找到 ${candidates.length} 個候選${precisionNote}，可編輯後歸檔`
           : '找不到自動座標，請手動輸入 緯度, 經度',
       }))
     } catch (err) {
@@ -279,7 +287,15 @@ export default function App() {
           rawText: work.ocrText,
         }),
       )
-      const best = candidates[0]
+      const best = candidates.find((c) => !c.suspicious) ?? candidates[0]
+      const precisionNote =
+        best?.precision === 'locality'
+          ? '（城鎮中心點，請確認）'
+          : best?.precision === 'street'
+            ? '（街道等級，請確認）'
+            : best?.suspicious
+              ? '（位置可疑，請確認）'
+              : ''
       setWork((w) => ({
         ...w,
         candidates,
@@ -288,7 +304,7 @@ export default function App() {
         coordsText: best ? formatCoords(best.lat, best.lng) : w.coordsText,
         status: 'ready',
         statusMessage: best
-          ? `已更新為 ${formatCoords(best.lat, best.lng)}`
+          ? `已更新為 ${formatCoords(best.lat, best.lng)}${precisionNote}`
           : '仍找不到，請手動輸入座標',
       }))
     } catch (err) {
@@ -658,7 +674,17 @@ export default function App() {
                       <li key={`${c.lat},${c.lng}`}>
                         <button type="button" onClick={() => pickCandidate(c)}>
                           <strong>{formatCoords(c.lat, c.lng)}</strong>
-                          <span>{c.displayName}</span>
+                          <span>
+                            {c.displayName}
+                            {c.precision === 'locality'
+                              ? ' · 城鎮中心'
+                              : c.precision === 'landmark'
+                                ? ' · 地標'
+                                : c.precision === 'street'
+                                  ? ' · 街道'
+                                  : ''}
+                            {c.suspicious ? ' · 可疑' : ''}
+                          </span>
                         </button>
                       </li>
                     ))}
