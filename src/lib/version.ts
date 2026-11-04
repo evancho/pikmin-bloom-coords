@@ -1,5 +1,5 @@
 /** Shown in UI and written to version.json at build time. */
-export const APP_BUILD = 'v1.3.0'
+export const APP_BUILD = 'v1.4.0'
 
 export type RemoteVersion = {
   build: string
