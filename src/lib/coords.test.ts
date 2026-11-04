@@ -525,6 +525,45 @@ Kaldfjord Church
   })
 })
 
+describe('Bielice Maria mine plaque', () => {
+  const postcardOcr = `---eng---
+tablica pamigtkowa Kopalni wegla
+brunatnego Maria
+PFEE  8,847,446mBielice FIHHEX
+tablica pamietkowa kopalni wegla
+brunatnego Maria w Bielicach
+PERE : 8,847,446mBielice HÆR
+---jpn---
+tablica pami計kowoa Kopalni wegla brunatnego Maria
+距離：8,847,446mBielice 科祖改夫
+距離：8,847,446mBielice 科祖鶴夫
+---chi---
+`
+  const mapOcr = `---eng---
+Bielice
+---jpn---
+Bielice
+---chi---
+`
+
+  it('joins the wrapped Polish title and disambiguates Bielice with Kożuchów', () => {
+    const postcard = parseLocationFromOcr(postcardOcr)
+    expect(postcard.title).toBe('tablica pamigtkowa Kopalni wegla brunatnego Maria')
+    expect(postcard.address).toMatch(/Bielice/)
+    expect(postcard.address).toMatch(/Kożuchów/)
+    expect(postcard.address).not.toMatch(/HÆR|FIHHEX/)
+    const map = parseLocationFromOcr(mapOcr)
+    expect(map.title).toBe('Bielice')
+    const merged = mergeParsedLocations([postcard, map])
+    expect(merged.title).toMatch(/Kopalni wegla brunatnego Maria/)
+    expect(merged.address).toMatch(/Bielice/)
+    expect(merged.address).toMatch(/Kożuchów/)
+    expect(merged.searchQueries.some((q) => /Bielice Kożuchów/.test(q))).toBe(true)
+    const hints = localityHints(merged)
+    expect(regionBiasFromHints(hints)?.label).toBe('kozuchow')
+  })
+})
+
 describe('imageEnhance', () => {
   it('computes an Otsu threshold that separates dark and light peaks', () => {
     const lums = new Uint8Array(1000)

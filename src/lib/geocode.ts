@@ -73,6 +73,12 @@ const REGION_BOXES: Array<{
     countrycodes: 'jp',
   },
   {
+    match: /Kożuch|Kozuchow|科祖/,
+    label: 'kozuchow',
+    viewbox: { south: 51.55, north: 51.9, west: 15.4, east: 15.9 },
+    countrycodes: 'pl',
+  },
+  {
     match: /Troms[øo]|Kval[øo]ya|Kald(?:fj|fi)ord/i,
     label: 'tromso',
     viewbox: { south: 69.0, north: 70.2, west: 17.5, east: 20.5 },

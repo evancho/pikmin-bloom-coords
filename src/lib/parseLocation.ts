@@ -71,6 +71,8 @@ function pickBestDistanceAddress(lines: string[]): string | null {
   const score = (a: string) => {
     let s = 0
     if (/[øåæØÅÆ]/.test(a)) s += 8
+    if (/[\u3400-\u9fff]/.test(a) || /Kożuch/i.test(a)) s += 6
+    if (a.split(/\s+/).length >= 2) s += 2
     if (/[bcdfghjklmnpqrstvwxyz]{4,}/i.test(a)) s -= 4
     const key = a.toLowerCase()
     s += found.filter((f) => f.toLowerCase() === key).length
@@ -92,14 +94,31 @@ function tidyAddressFragment(raw: string | undefined): string | null {
   if (rest.length < 2) return null
   // "Kvaløva" is the usual y→v miss of Norwegian "…øya" (the island).
   rest = rest.replace(/øva\b/gi, 'øya')
-  // Collapse duplicated locality tokens from OCR ("Plasy Plasy" → "Plasy").
   const parts = rest.split(/\s+/).filter(Boolean)
   const uniq: string[] = []
   for (const p of parts) {
-    if (!uniq.some((u) => u.toLowerCase() === p.toLowerCase())) uniq.push(p)
+    const exo = cjkExonym(p)
+    const token = exo ?? p
+    // Eng OCR of the Chinese town name next to Bielice ("科祖霍夫" → HÆR / FIHHEX).
+    if (!exo && /^[A-ZÆØÅÐÞŒ]{2,8}$/.test(token)) continue
+    if (!uniq.some((u) => u.toLowerCase() === token.toLowerCase())) uniq.push(token)
   }
   rest = uniq.join(' ')
   return rest.length >= 2 ? rest : null
+}
+
+/** Traditional-Chinese Bloom exonyms, allowing one OCR substitution. */
+const CJK_EXONYMS: Array<{ name: string; latin: string }> = [
+  { name: '科祖霍夫', latin: 'Kożuchów' },
+]
+
+function cjkExonym(token: string): string | null {
+  const cjk = token.replace(/[^\u3400-\u9fff]/g, '')
+  if (cjk.length < 3) return null
+  for (const row of CJK_EXONYMS) {
+    if (cjk === row.name || levenshtein(cjk, row.name) <= 1) return row.latin
+  }
+  return null
 }
 
 const LATIN_NAME =
@@ -162,7 +181,7 @@ export function hasChurchHint(text: string): boolean {
 /** Title Case place names such as "Gemeentehuis Oud-Turnhout". */
 export function looksLikeLatinName(line: string): boolean {
   const t = tidyLine(line).replace(/\.+$/, '')
-  if (t.length < 4 || t.length > 48) return false
+  if (t.length < 4 || t.length > 72) return false
   if (/[0-9]/.test(t)) return false
   // Ampersand / symbols are almost always OCR noise (Klášter → Kl&ster).
   if (/[&@#%^*_+=<>{}[\]|\\]/.test(t)) return false
@@ -287,6 +306,21 @@ function pickBestLatinTitle(
   for (const line of consensus) consider(line, scoreLatinTitle(line, 0) + 20)
   engLines.forEach((line, i) => consider(line, scoreLatinTitle(line, i)))
   for (const line of extras) consider(line, scoreLatinTitle(line, 2))
+  // A wrapped first line is a word-prefix of the joined title. Give the
+  // longer line the shorter line's votes so "… wegla" does not beat
+  // "… wegla brunatnego Maria".
+  for (const short of [...groups.keys()]) {
+    for (const long of [...groups.keys()]) {
+      if (short === long || !long.startsWith(`${short} `)) continue
+      const s = groups.get(short)
+      const l = groups.get(long)
+      if (!s || !l) continue
+      l.n += s.n
+      l.score = Math.max(l.score, s.score)
+      groups.delete(short)
+      break
+    }
+  }
   let best: Group | null = null
   for (const g of groups.values()) {
     const total = g.n * 10 + g.score
@@ -353,11 +387,32 @@ export function isWeakLatinOcrTitle(line: string): boolean {
   }
   const words = t.split(/\s+/).filter(Boolean)
   const lowerLead = words.filter((w) => /^[a-z]/.test(w)).length
-  // Only weak when the title itself starts lowercase ("an vere Fushimi Ward").
-  // English postcard titles legitimately carry lowercase common nouns
-  // ("La Salle Lake recreation area") — do not reject those.
-  if (words.length >= 3 && lowerLead >= 2 && /^[a-z]/.test(t)) return true
+  // Only weak when the title itself starts with a short lowercase fragment
+  // ("an vere Fushimi Ward"). A real sentence-case title such as Polish
+  // "tablica pamiątkowa …" starts with a full word and should be kept.
+  const first = words[0] ?? ''
+  if (words.length >= 3 && lowerLead >= 2 && /^[a-z]/.test(t) && first.length <= 4) {
+    return true
+  }
   return false
+}
+
+/**
+ * Postcard titles wrap. "… Kopalni wegla" + "brunatnego Maria" is one title.
+ * Only join when the next line is a lowercase word followed by a capital,
+ * so a junk token like "enfrance" is not glued on.
+ */
+function joinWrappedLatinLines(lines: string[]): string[] {
+  const out = [...lines]
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    const cur = lines[i]!
+    const next = lines[i + 1]!
+    if (/\d/.test(cur) || /\d/.test(next)) continue
+    if (!/[A-Za-zÀ-ÿ]{4,}/.test(cur)) continue
+    if (!/^[a-zà-ÿā-ž]{5,}\s+[A-ZÀ-Ý]/.test(next)) continue
+    out.push(`${tidyLine(cur)} ${tidyLine(next)}`)
+  }
+  return out
 }
 
 function scoreTitle(line: string): number {
@@ -462,7 +517,7 @@ export function parseLocationFromOcr(
     ) ?? null
   const samePass =
     passes.eng === passes.jpn && (!passes.chi || passes.chi === passes.eng)
-  const latinSourceLines = samePass ? lines : engLines
+  const latinSourceLines = joinWrappedLatinLines(samePass ? lines : engLines)
   const hintLocality =
     lines.map(extractLocalityFromHint).find((x): x is string => Boolean(x)) ??
     null
