@@ -1,17 +1,25 @@
 import { describe, expect, it } from 'vitest'
 import { captionBandFromRows, type CaptionRow } from './captionCrop'
 import { formatCoords, parseCoordsText } from './coords'
+import { otsuThreshold } from './imageEnhance'
 import {
   expandPlaceQueries,
+  inferPrecision,
+  localityConsistencyScore,
+  markSuspicious,
   nameMatchScore,
   poiTypeScore,
   queryPrefersJapan,
+  regionBiasFromHints,
+  scoreAgainstQueries,
   scoreGeocodeCandidate,
 } from './geocode'
 import {
+  consensusLatinTitles,
   extractLocalityFromHint,
   isCommemorativePhrase,
   isWeakLatinOcrTitle,
+  localityHints,
   mergeParsedLocations,
   parseLocationFromOcr,
 } from './parseLocation'
@@ -269,9 +277,69 @@ describe('caption band', () => {
     expect(band).not.toBeNull()
     expect(band!.y).toBeGreaterThanOrEqual(860)
     expect(band!.y).toBeLessThan(980)
-    // Include the full blue panel so smaller address lines are not clipped.
+    // End near the last text row — do not stretch into unrelated chrome.
     expect(band!.y + band!.height).toBeGreaterThan(1100)
-    expect(band!.y + band!.height).toBeLessThan(1280)
+    expect(band!.y + band!.height).toBeLessThan(1200)
+  })
+
+  it('prefers the purple caption card over textured blue sky (Kaldfjord)', () => {
+    const rows: CaptionRow[] = []
+    // Photo sky: blue-ish, almost every row textured → must be skipped.
+    for (let y = 708; y < 1024; y += 2) {
+      rows.push({ y, r: 76, g: 109, b: 157, contrast: 8 })
+    }
+    // Snow / building mid section
+    for (let y = 1024; y < 1450; y += 2) {
+      rows.push({ y, r: 200, g: 200, b: 205, contrast: 3 })
+    }
+    // Purple caption card: flat field + sparse text rows
+    for (let y = 1450; y < 1670; y += 2) {
+      const isText =
+        (y >= 1470 && y < 1510) || (y >= 1540 && y < 1580) || (y >= 1610 && y < 1640)
+      rows.push({
+        y,
+        r: 53,
+        g: 37,
+        b: 113,
+        contrast: isText ? 12 : 0.2,
+      })
+    }
+    // Page chrome below
+    for (let y = 1670; y < 1940; y += 2) {
+      rows.push({ y, r: 40, g: 30, b: 90, contrast: 0.1 })
+    }
+    const band = captionBandFromRows(rows, 2000)
+    expect(band).not.toBeNull()
+    expect(band!.y).toBeGreaterThanOrEqual(1440)
+    expect(band!.y).toBeLessThan(1480)
+    expect(band!.y + band!.height).toBeGreaterThan(1620)
+    expect(band!.y + band!.height).toBeLessThan(1700)
+  })
+
+  it('keeps a multi-line purple caption even when text rows exceed half', () => {
+    const rows: CaptionRow[] = []
+    for (let y = 850; y < 910; y += 2) {
+      rows.push({ y, r: 50, g: 91, b: 120, contrast: 3 })
+    }
+    for (let y = 910; y < 1108; y += 2) {
+      rows.push({ y, r: 15, g: 60, b: 95, contrast: 4.4 })
+    }
+    // 60% text rows, 40% flat — the old >50% cutoff dropped this card.
+    for (let y = 1108; y < 1594; y += 2) {
+      const cycle = ((y - 1108) / 2) % 10
+      rows.push({
+        y,
+        r: 53,
+        g: 40,
+        b: 113,
+        contrast: cycle < 6 ? 12 : 0.2,
+      })
+    }
+    const band = captionBandFromRows(rows, 1626)
+    expect(band).not.toBeNull()
+    expect(band!.y).toBeGreaterThanOrEqual(1100)
+    expect(band!.y).toBeLessThan(1200)
+    expect(band!.y + band!.height).toBeGreaterThan(1500)
   })
 })
 
@@ -407,5 +475,372 @@ Kl&ster Plasy.
     expect(parsed.searchQueries.some((q) => /Klaster|Klášter/i.test(q))).toBe(
       true,
     )
+  })
+})
+
+describe('Kaldfjord Church postcard OCR/parse', () => {
+  const kaldfjordOcr = `---eng---
+Kaldfjord Church
+7,889,280mKvaløya
+Kaldfjord Church
+距離：7,889,280mKvaløya
+---jpn---
+Kaldfjord Church
+距離：7,889,280mKvaløya
+---chi---
+`
+
+  it('splits glued distance+place and keeps Kaldfjord Church title', () => {
+    const parsed = parseLocationFromOcr(kaldfjordOcr)
+    expect(parsed.title).toBe('Kaldfjord Church')
+    expect(parsed.address).toMatch(/Kval[øo]ya/i)
+    expect(parsed.searchQueries).toContain('Kaldfjord kirke')
+    expect(parsed.searchQueries.some((q) => /Kval/i.test(q))).toBe(true)
+  })
+
+  it('keeps Kaldfjord Church from the real postcard+map OCR dump', () => {
+    // Captured from the two screenshots (eng misreads fj as fi; jpn inserts g).
+    const postcard = parseLocationFromOcr(`---eng---
+Kaldfiord Church
+Kaldfiord Church
+Kaldfjord Church
+PERE  7,889,280mKvalgya
+fått : / 889 280mKvaløva
+PEE. / 889 280mKvalgyva
+---jpn---
+Kagldfiord Church
+Kagldfiord Church
+Kaldfjiord Church
+距離: 7,889,280mKvalgya
+距離 7.889.280mKvalaya
+---chi---
+`)
+    const map = parseLocationFromOcr(`---eng---
+Kaldfjord
+xX
+Kaldfiord
+---jpn---
+Kaldfjord
+---chi---
+`)
+    expect(postcard.title).toBe('Kaldfjord Church')
+    expect(postcard.address).toBe('Kvaløya')
+    expect(postcard.searchQueries).toContain('Kaldfjord kirke')
+    expect(postcard.searchQueries.some((q) => /Stadtkirche/i.test(q))).toBe(false)
+    expect(map.title).toBe('Kaldfjord')
+    const merged = mergeParsedLocations([postcard, map])
+    expect(merged.title).toBe('Kaldfjord Church')
+    expect(merged.address).toBe('Kvaløya')
+    expect(merged.searchQueries[0]).toMatch(/Kaldfjord/)
+  })
+
+  it('prefers eng+jpn consensus title over a weaker single-line guess', () => {
+    expect(
+      consensusLatinTitles(
+        ['Koldlord Church', 'Kaldfjord Church'],
+        ['Kaldfjord Church'],
+      ),
+    ).toContain('Kaldfjord Church')
+    const parsed = parseLocationFromOcr(`---eng---
+Koldlord Church
+Kaldfjord Church
+---jpn---
+Kaldfjord Church
+`)
+    expect(parsed.title).toBe('Kaldfjord Church')
+  })
+})
+
+describe('Bielice Maria mine plaque', () => {
+  const postcardOcr = `---eng---
+tablica pamigtkowa Kopalni wegla
+brunatnego Maria
+PFEE  8,847,446mBielice FIHHEX
+tablica pamietkowa kopalni wegla
+brunatnego Maria w Bielicach
+PERE : 8,847,446mBielice HÆR
+---jpn---
+tablica pami計kowoa Kopalni wegla brunatnego Maria
+距離：8,847,446mBielice 科祖改夫
+距離：8,847,446mBielice 科祖鶴夫
+---chi---
+`
+  const mapOcr = `---eng---
+Bielice
+---jpn---
+Bielice
+---chi---
+`
+
+  it('joins the wrapped Polish title and disambiguates Bielice with Kożuchów', () => {
+    const postcard = parseLocationFromOcr(postcardOcr)
+    expect(postcard.title).toBe('tablica pamigtkowa Kopalni wegla brunatnego Maria')
+    expect(postcard.address).toMatch(/Bielice/)
+    expect(postcard.address).toMatch(/Kożuchów/)
+    expect(postcard.address).not.toMatch(/HÆR|FIHHEX/)
+    const map = parseLocationFromOcr(mapOcr)
+    expect(map.title).toBe('Bielice')
+    const merged = mergeParsedLocations([postcard, map])
+    expect(merged.title).toMatch(/Kopalni wegla brunatnego Maria/)
+    expect(merged.address).toMatch(/Bielice/)
+    expect(merged.address).toMatch(/Kożuchów/)
+    expect(merged.searchQueries.some((q) => /Bielice Kożuchów/.test(q))).toBe(true)
+    const hints = localityHints(merged)
+    expect(regionBiasFromHints(hints)?.label).toBe('kozuchow')
+  })
+})
+
+describe('Table for Giants postcard', () => {
+  const ocr = `---eng---
+Table tor Giants
+Table tor Giants
+Table for Giants
+FEE 12,524,963mTheewaterskloof Rural
+An eye-catching display at Dassiesfontein.
+---jpn---
+Table for Giaqntis
+距離・12,524,963mTheewaiterskloof Rural
+An eye-catching display at Dassiesfontein.
+---chi---
+`
+
+  it('keeps the title and searches Dassiesfontein in Theewaterskloof', () => {
+    const parsed = parseLocationFromOcr(ocr)
+    expect(parsed.title).toBe('Table for Giants')
+    expect(parsed.address).toMatch(/Theewaterskloof/)
+    expect(parsed.description).toMatch(/Dassiesfontein/)
+    expect(parsed.searchQueries[0]).toBe('Table for Giants Dassiesfontein')
+    expect(parsed.searchQueries).toContain('Dassiesfontein Theewaterskloof')
+    const hints = localityHints(parsed)
+    expect(hints).toContain('Dassiesfontein')
+    expect(hints).toContain('Theewaterskloof')
+    expect(hints).not.toContain('Rural')
+    expect(regionBiasFromHints(hints)?.label).toBe('theewaterskloof')
+    expect(regionBiasFromHints(hints)?.countrycodes).toBe('za')
+  })
+})
+
+describe('Nishihama beach postcard', () => {
+  const ocr = `---eng---
+TEER . mTTET EER
+FEB : 379,779mT ERT KERR
+---jpn---
+距離 : 379.779m竹富町 波照間
+近メいる
+日本最南端のビーチ
+日太最南端のビーチ
+---chi---
+`
+
+  it('maps the southernmost beach caption to ニシ浜 on Hateruma', () => {
+    const parsed = parseLocationFromOcr(ocr)
+    expect(parsed.title).toBe('ニシ浜')
+    expect(parsed.address).toMatch(/波照間/)
+    expect(parsed.description).toBe('日本最南端のビーチ')
+    expect(parsed.searchQueries[0]).toBe('ニシ浜 波照間')
+    expect(parsed.title).not.toMatch(/TEER|近メ/)
+    expect(regionBiasFromHints(localityHints(parsed))?.label).toBe('hateruma')
+  })
+})
+
+describe('Bikkuri Donkey postcard', () => {
+  const ocr = `---eng---
+A yy te
+PERE  ImREET ARIIHEF
+---jpn---
+びっ 0 ドンキー 距離 ・1m東廣島市 西條町御園宇 東広島市御菌宇にあるハンバーグレストラン でオシャレな内付でハンバーグを主とする多 くのメニューがあります 。
+ぴらっらくの ンキー
+距離 ・1m東廣島市 西條町御園宇
+東広島市御蘭宇にあるハンバーグレストラン
+---chi---
+`
+
+  it('places びっくりドンキー in Saijo, Higashihiroshima', () => {
+    const parsed = parseLocationFromOcr(ocr)
+    expect(parsed.title).toBe('びっくりドンキー')
+    expect(parsed.address).toBe('東広島市 西条町 御薗宇')
+    expect(parsed.searchQueries[0]).toContain('びっくりドンキー')
+    expect(parsed.searchQueries[0]).toContain('御薗宇')
+    expect(parsed.description).toContain('御薗宇')
+    expect(parsed.description).not.toMatch(/御[菌蘭]宇/)
+    expect(regionBiasFromHints(localityHints(parsed))?.label).toBe(
+      'higashihiroshima',
+    )
+  })
+})
+
+describe('imageEnhance', () => {
+  it('computes an Otsu threshold that separates dark and light peaks', () => {
+    const lums = new Uint8Array(1000)
+    for (let i = 0; i < 500; i += 1) lums[i] = 30
+    for (let i = 500; i < 1000; i += 1) lums[i] = 200
+    const thr = otsuThreshold(lums)
+    expect(thr).toBeGreaterThanOrEqual(30)
+    expect(thr).toBeLessThan(200)
+    // Binarization with > thr keeps the two classes apart.
+    expect(30 > thr).toBe(false)
+    expect(200 > thr).toBe(true)
+  })
+})
+
+describe('geocode precision and Kaldfjord ranking', () => {
+  it('expands Nordic kirke queries and locality combos', () => {
+    const qs = expandPlaceQueries('Kaldfjord Church', 'Kvaløya')
+    expect(qs).toContain('Kaldfjord kirke')
+    expect(qs).toContain('Kaldfjord Church Kvaløya')
+    expect(qs).toContain('Kaldfjord')
+  })
+
+  it('ranks Tromsø / Kvaløy church above Guernsey Church Lane', () => {
+    const hints = localityHints(
+      parseLocationFromOcr(`---eng---
+Kaldfjord Church
+距離：7,889,280mKvaløya
+---jpn---
+Kaldfjord Church
+`),
+    )
+    expect(hints.some((h) => /Kval/i.test(h))).toBe(true)
+    const region = regionBiasFromHints(hints)
+    expect(region?.label).toBe('tromso')
+
+    const guernsey = {
+      displayName: 'Church Lane, St Peter Port, Guernsey',
+      lat: 49.455,
+      lng: -2.536,
+      importance: 0.4,
+      className: 'highway',
+      typeName: 'residential',
+    }
+    const kvaloy = {
+      displayName: 'Kvaløy kirke, Kaldfjord, Tromsø, Troms, Norge',
+      lat: 69.6806,
+      lng: 18.7442,
+      importance: 0.35,
+      className: 'amenity',
+      typeName: 'place_of_worship',
+    }
+    const queries = expandPlaceQueries('Kaldfjord Church', 'Kvaløya')
+    expect(
+      scoreAgainstQueries(kvaloy, queries, hints, region),
+    ).toBeGreaterThan(scoreAgainstQueries(guernsey, queries, hints, region))
+  })
+
+  it('does not boost Kyushu for unrelated Latin places', () => {
+    expect(regionBiasFromHints(['Kaldfjord', 'Kvaløya'])?.label).not.toBe(
+      'oita',
+    )
+    const plasyRegion = regionBiasFromHints(['Plasy'])
+    const inPlasy = scoreGeocodeCandidate(
+      {
+        displayName: 'Klášter Plasy, Plasy, Česko',
+        lat: 49.935,
+        lng: 13.39,
+        importance: 0.5,
+        className: 'amenity',
+        typeName: 'monastery',
+      },
+      'Klášter Plasy',
+      ['Plasy'],
+      plasyRegion,
+    )
+    const oitaHit = scoreGeocodeCandidate(
+      {
+        displayName: 'Somewhere, 大分県, Japan',
+        lat: 33.2,
+        lng: 131.6,
+        importance: 0.5,
+        className: 'place',
+        typeName: 'city',
+      },
+      'Klášter Plasy',
+      ['Plasy'],
+      plasyRegion,
+    )
+    expect(inPlasy).toBeGreaterThan(oitaHit)
+    expect(
+      regionBiasFromHints(['Gemeentehuis', 'Oud-Turnhout'])?.label,
+    ).not.toBe('oita')
+  })
+
+  it('marks Open-Meteo-style hits as locality precision', () => {
+    expect(inferPrecision('place', 'locality')).toBe('locality')
+    expect(inferPrecision('amenity', 'place_of_worship')).toBe('landmark')
+    expect(inferPrecision('amenity', 'restaurant')).toBe('landmark')
+    expect(inferPrecision('highway', 'residential')).toBe('street')
+  })
+
+  it('ranks the named restaurant above a hall that only shares the quarter', () => {
+    const query = 'びっくりドンキー 東広島市 西条町 御薗宇'
+    const hints = ['東広島', '西条', '御薗宇']
+    const region = regionBiasFromHints(hints)
+    const restaurant = scoreGeocodeCandidate(
+      {
+        displayName: 'びっくりドンキー, 国道375号, 東広島市, 広島県, 日本',
+        lat: 34.408428,
+        lng: 132.750994,
+        importance: 0.01,
+        className: 'amenity',
+        typeName: 'restaurant',
+      },
+      query,
+      hints,
+      region,
+    )
+    const hall = scoreGeocodeCandidate(
+      {
+        displayName: 'こもれびの家 御薗宇, 西条中央巡回線, 東広島市, 広島県, 日本',
+        lat: 34.416369,
+        lng: 132.753848,
+        importance: 0.01,
+        className: 'amenity',
+        typeName: 'social_facility',
+      },
+      query,
+      hints,
+      region,
+    )
+    expect(restaurant).toBeGreaterThan(hall)
+  })
+
+  it('flags far-away candidates as suspicious', () => {
+    const region = regionBiasFromHints(['Kaldfjord', 'Kvaløya', 'Tromsø'])
+    const marked = markSuspicious(
+      [
+        {
+          displayName: 'Kvaløy kirke, Tromsø, Norge',
+          lat: 69.6806,
+          lng: 18.7442,
+          className: 'amenity',
+          typeName: 'place_of_worship',
+        },
+        {
+          displayName: 'Church Lane, Guernsey',
+          lat: 49.455,
+          lng: -2.536,
+          className: 'highway',
+          typeName: 'residential',
+        },
+      ],
+      region,
+      ['Kvaløya', 'Tromsø', 'Kaldfjord'],
+    )
+    expect(marked[0]?.suspicious).toBeFalsy()
+    expect(marked[1]?.suspicious).toBe(true)
+  })
+
+  it('penalizes display_name that lacks parsed locality', () => {
+    expect(
+      localityConsistencyScore('Church Lane, Guernsey', [
+        'Kvaløya',
+        'Kaldfjord',
+      ]),
+    ).toBeLessThan(0)
+    expect(
+      localityConsistencyScore('Kvaløy kirke, Kaldfjord, Tromsø', [
+        'Kvaløya',
+        'Kaldfjord',
+      ]),
+    ).toBeGreaterThan(0)
   })
 })

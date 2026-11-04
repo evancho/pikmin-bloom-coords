@@ -1,8 +1,20 @@
+/** Coarse accuracy of a geocode hit (Open-Meteo is always locality/town center). */
+export type GeocodePrecision =
+  | 'landmark'
+  | 'housenumber'
+  | 'street'
+  | 'locality'
+  | 'unknown'
+
 export type GeocodeCandidate = {
   displayName: string
   lat: number
   lng: number
   importance?: number
+  /** landmark / street / town-center, etc. */
+  precision?: GeocodePrecision
+  /** Far from OCR-derived region or inconsistent with locality hints. */
+  suspicious?: boolean
 }
 
 export type ParsedLocation = {
