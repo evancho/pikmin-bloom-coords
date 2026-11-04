@@ -1,5 +1,5 @@
 .app {
-  width: min(920px, calc(100% - 2rem));
+  width: min(1100px, calc(100% - 2rem));
   margin: 0 auto;
   padding: 2.5rem 0 4rem;
 }
@@ -445,8 +445,59 @@
 }
 
 .archive {
+  display: block;
+}
+
+.archive-layout {
+  display: grid;
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.archive-list {
   display: grid;
   gap: 1.5rem;
+  min-width: 0;
+}
+
+.usage-guide {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(47, 107, 79, 0.06);
+  padding: 1rem 1rem 1.1rem;
+}
+
+.usage-guide h2 {
+  margin: 0 0 0.7rem;
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+  color: var(--leaf-deep);
+}
+
+.usage-guide ol {
+  margin: 0;
+  padding-left: 1.2rem;
+  display: grid;
+  gap: 0.6rem;
+  color: var(--ink-soft);
+  line-height: 1.5;
+  font-size: 0.92rem;
+}
+
+.usage-guide strong {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+@media (min-width: 900px) {
+  .archive-layout {
+    grid-template-columns: minmax(0, 1fr) 18.5rem;
+  }
+
+  .usage-guide {
+    position: sticky;
+    top: 1rem;
+  }
 }
 
 .empty {

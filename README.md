@@ -2,6 +2,8 @@
 
 分開上傳 Pikmin Bloom「明信片」與「地圖」截圖 → OCR 讀出地名與地址 → 查詢緯度、經度 → 可編輯後用愛心歸檔。
 
+目前版本：**1.4.0**
+
 **手機**：可安裝成主畫面 App（iPhone Safari／Android Chrome），並用「同步檔」在 iOS ↔ Android 共用喜好。
 
 ## 座標格式
@@ -57,7 +59,7 @@ npm run dev
 - 日文＋英文＋挪威文 OCR（Tesseract.js），兩張截圖合併查座標
 - 依地名／地址查座標（Nominatim／Photon／Open-Meteo 合併評分；可手動修正）
 - 候選標示精度（地標／街道／城鎮中心）與可疑位置；北歐 kirke 等查詢變體
-- 儲存／愛心歸檔（本機 IndexedDB，歸檔可切換多張截圖）
+- 儲存／愛心歸檔（本機 IndexedDB，歸檔可切換多張截圖；歸檔頁右側有使用說明）
 - 匯出／匯入同步檔（跨裝置喜好）
 - 有新版本時顯示「有新版本可用」，點「重新載入」才更新
 - 查詢結果記憶體／IndexedDB 快取，遵守 Nominatim 頻率與 User-Agent

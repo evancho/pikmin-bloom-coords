@@ -723,50 +723,83 @@ export default function App() {
         </main>
       ) : (
         <main className="panel archive rise">
-          {archive.length === 0 ? (
-            <p className="empty">還沒有歸檔。辨識截圖後按愛心或儲存即可。</p>
-          ) : (
-            <>
-              {hearts.length > 0 && (
-                <section>
-                  <h2 className="section-title">♥ 愛心</h2>
-                  <div className="cards">
-                    {hearts.map((item) => (
-                      <ArchiveCard
-                        key={item.id}
-                        item={item}
-                        onChange={updateArchiveField}
-                        onDelete={removeArchive}
-                      />
-                    ))}
-                  </div>
-                </section>
+          <div className="archive-layout">
+            <div className="archive-list">
+              {archive.length === 0 ? (
+                <p className="empty">還沒有歸檔。辨識截圖後按愛心或儲存即可。</p>
+              ) : (
+                <>
+                  {hearts.length > 0 && (
+                    <section>
+                      <h2 className="section-title">♥ 愛心</h2>
+                      <div className="cards">
+                        {hearts.map((item) => (
+                          <ArchiveCard
+                            key={item.id}
+                            item={item}
+                            onChange={updateArchiveField}
+                            onDelete={removeArchive}
+                          />
+                        ))}
+                      </div>
+                    </section>
+                  )}
+                  {others.length > 0 && (
+                    <section>
+                      <h2 className="section-title">全部歸檔</h2>
+                      <div className="cards">
+                        {others.map((item) => (
+                          <ArchiveCard
+                            key={item.id}
+                            item={item}
+                            onChange={updateArchiveField}
+                            onDelete={removeArchive}
+                          />
+                        ))}
+                      </div>
+                    </section>
+                  )}
+                </>
               )}
-              {others.length > 0 && (
-                <section>
-                  <h2 className="section-title">全部歸檔</h2>
-                  <div className="cards">
-                    {others.map((item) => (
-                      <ArchiveCard
-                        key={item.id}
-                        item={item}
-                        onChange={updateArchiveField}
-                        onDelete={removeArchive}
-                      />
-                    ))}
-                  </div>
-                </section>
-              )}
-            </>
-          )}
-          <p className="hint-foot">
-            本機歸檔（IndexedDB）。要跨 iPhone／Android 請用上方「匯出／匯入同步檔」。愛心數：
-            {favoritedCount}
-          </p>
+              <p className="hint-foot">
+                本機歸檔（IndexedDB）。要跨 iPhone／Android 請用上方「匯出／匯入同步檔」。愛心數：
+                {favoritedCount}
+              </p>
+            </div>
+            <UsageGuide />
+          </div>
         </main>
       )}
       </div>
     </>
+  )
+}
+
+function UsageGuide() {
+  return (
+    <aside className="usage-guide" aria-label="使用說明">
+      <h2>使用說明</h2>
+      <ol>
+        <li>
+          到<strong>辨識</strong>選明信片截圖。有地圖畫面再補第二格，兩格都選完會自動找座標。
+        </li>
+        <li>
+          日本明信片用<strong>日文優先</strong>，歐美地名用<strong>英文優先</strong>。不確定就留自動。
+        </li>
+        <li>
+          核對地點名稱、地址與座標。候選若標<strong>城鎮中心</strong>或<strong>可疑</strong>，先點其他候選或自己改。
+        </li>
+        <li>
+          按<strong>複製座標</strong>，或開 OSM／Google 確認位置。
+        </li>
+        <li>
+          <strong>愛心歸檔</strong>會標成喜好；<strong>儲存歸檔</strong>只留下這筆。
+        </li>
+        <li>
+          歸檔可以改名稱與座標、切換截圖、刪除。換手機用上方<strong>匯出／匯入同步檔</strong>。
+        </li>
+      </ol>
+    </aside>
   )
 }
 
