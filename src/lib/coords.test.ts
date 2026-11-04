@@ -472,6 +472,42 @@ Kaldfjord Church
     expect(parsed.searchQueries.some((q) => /Kval/i.test(q))).toBe(true)
   })
 
+  it('keeps Kaldfjord Church from the real postcard+map OCR dump', () => {
+    // Captured from the two screenshots (eng misreads fj as fi; jpn inserts g).
+    const postcard = parseLocationFromOcr(`---eng---
+Kaldfiord Church
+Kaldfiord Church
+Kaldfjord Church
+PERE  7,889,280mKvalgya
+fått : / 889 280mKvaløva
+PEE. / 889 280mKvalgyva
+---jpn---
+Kagldfiord Church
+Kagldfiord Church
+Kaldfjiord Church
+距離: 7,889,280mKvalgya
+距離 7.889.280mKvalaya
+---chi---
+`)
+    const map = parseLocationFromOcr(`---eng---
+Kaldfjord
+xX
+Kaldfiord
+---jpn---
+Kaldfjord
+---chi---
+`)
+    expect(postcard.title).toBe('Kaldfjord Church')
+    expect(postcard.address).toBe('Kvaløya')
+    expect(postcard.searchQueries).toContain('Kaldfjord kirke')
+    expect(postcard.searchQueries.some((q) => /Stadtkirche/i.test(q))).toBe(false)
+    expect(map.title).toBe('Kaldfjord')
+    const merged = mergeParsedLocations([postcard, map])
+    expect(merged.title).toBe('Kaldfjord Church')
+    expect(merged.address).toBe('Kvaløya')
+    expect(merged.searchQueries[0]).toMatch(/Kaldfjord/)
+  })
+
   it('prefers eng+jpn consensus title over a weaker single-line guess', () => {
     expect(
       consensusLatinTitles(

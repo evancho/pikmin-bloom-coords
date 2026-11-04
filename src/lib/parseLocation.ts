@@ -48,22 +48,35 @@ function isUiChrome(s: string): boolean {
 
 function extractAddressFromDistanceLine(line: string): string | null {
   const m = line.match(
-    /(?:距離|距离|Distance)\s*[:：]?\s*[\d,，.?]+\s*m?\s*(.+)$/i,
+    /(?:距離|距离|Distance)\s*[:：]?\s*[\d,，.?\s]+\s*m?\s*(.+)$/i,
   )
-  if (!m) {
-    // English OCR often mangles 距離 into noise but keeps "123m Place".
-    // Also handle glued forms: "7,889,280mKvaløya".
-    const eng = line.match(
-      /(?:^|[^\d])(?:[\d?]{1,3}[,，]?){1,4}\d{2,}\s*m\s*([A-Za-zÀ-ÿØøÅåÆæ].+)$/i,
-    )
-    if (eng) return tidyAddressFragment(eng[1])
-    const glued = line.match(
-      /(?:[\d?]{1,3}[,，]?){1,4}\d{2,}m([A-Za-zÀ-ÿØøÅåÆæ][A-Za-zÀ-ÿØøÅåÆæ'’\-\s]{1,})$/i,
-    )
-    if (!glued) return null
-    return tidyAddressFragment(glued[1])
+  if (m) return tidyAddressFragment(m[1])
+  // English OCR often mangles 距離 into noise but keeps "123m Place"
+  // or glued "7,889,280mKvaløya" / "889 280mKvaløva".
+  const loose = line.match(
+    /\d[\d\s,，.]{2,}m\s*([A-Za-zÀ-ÿØøÅåÆæ][A-Za-zÀ-ÿØøÅåÆæ'’\-\s]{1,40})/i,
+  )
+  if (!loose) return null
+  return tidyAddressFragment(loose[1])
+}
+
+/** Prefer a Nordic-letter reading over repeated ASCII misreads (Kvaløya vs Kvalaya). */
+function pickBestDistanceAddress(lines: string[]): string | null {
+  const found: string[] = []
+  for (const line of lines) {
+    const after = extractAddressFromDistanceLine(line)
+    if (after) found.push(after)
   }
-  return tidyAddressFragment(m[1])
+  if (!found.length) return null
+  const score = (a: string) => {
+    let s = 0
+    if (/[øåæØÅÆ]/.test(a)) s += 8
+    if (/[bcdfghjklmnpqrstvwxyz]{4,}/i.test(a)) s -= 4
+    const key = a.toLowerCase()
+    s += found.filter((f) => f.toLowerCase() === key).length
+    return s
+  }
+  return [...found].sort((a, b) => score(b) - score(a) || b.length - a.length)[0] ?? null
 }
 
 function tidyAddressFragment(raw: string | undefined): string | null {
@@ -77,6 +90,8 @@ function tidyAddressFragment(raw: string | undefined): string | null {
   if (!rest) return null
   if (/^[\d?,.\sm]+$/i.test(rest)) return null
   if (rest.length < 2) return null
+  // "Kvaløva" is the usual y→v miss of Norwegian "…øya" (the island).
+  rest = rest.replace(/øva\b/gi, 'øya')
   // Collapse duplicated locality tokens from OCR ("Plasy Plasy" → "Plasy").
   const parts = rest.split(/\s+/).filter(Boolean)
   const uniq: string[] = []
@@ -238,37 +253,71 @@ export function consensusLatinTitles(
   return out
 }
 
+/** fi/fj and the extra i in "Kaldfjiord" collapse to one place key. */
+export function canonLatinKey(s: string): string {
+  return tidyLine(s)
+    .replace(/\.+$/, '')
+    .toLowerCase()
+    .replace(/fji/g, 'fj')
+    .replace(/fi/g, 'fj')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 function pickBestLatinTitle(
   engLines: string[],
   extras: string[],
   consensus: string[] = [],
 ): string | null {
-  const scored: Array<{ line: string; score: number }> = []
-  // Consensus across OCR passes wins over any single-line title guess.
-  for (const line of consensus) {
-    if (!looksLikeLatinName(line)) continue
-    scored.push({
-      line: tidyLine(line).replace(/\.+$/, ''),
-      score: scoreLatinTitle(line, 0) + 20,
-    })
-  }
-  engLines.forEach((line, i) => {
+  type Group = { n: number; line: string; score: number }
+  const groups = new Map<string, Group>()
+  const isCleanFj = (s: string) => /fj/i.test(s) && !/fji/i.test(s)
+  const consider = (line: string, score: number) => {
     if (!looksLikeLatinName(line)) return
-    scored.push({
-      line: tidyLine(line).replace(/\.+$/, ''),
-      score: scoreLatinTitle(line, i),
-    })
-  })
-  for (const line of extras) {
-    if (!looksLikeLatinName(line)) continue
-    // Regex extras have no line index — treat as weaker than the first OCR line.
-    scored.push({
-      line: tidyLine(line).replace(/\.+$/, ''),
-      score: scoreLatinTitle(line, 2),
-    })
+    const tidy = tidyLine(line).replace(/\.+$/, '')
+    const key = canonLatinKey(tidy)
+    const cur = groups.get(key) ?? { n: 0, line: tidy, score: -Infinity }
+    cur.n += 1
+    cur.score = Math.max(cur.score, score)
+    // Inside one fi/fj cluster, keep the fj spelling (Kaldfjord over Kaldfiord).
+    if (isCleanFj(tidy) && !isCleanFj(cur.line)) cur.line = tidy
+    groups.set(key, cur)
   }
-  scored.sort((a, b) => b.score - a.score || b.line.length - a.line.length)
-  return scored[0]?.line ?? null
+  // Same reading on eng + jpn beats a one-off single-line crop.
+  for (const line of consensus) consider(line, scoreLatinTitle(line, 0) + 20)
+  engLines.forEach((line, i) => consider(line, scoreLatinTitle(line, i)))
+  for (const line of extras) consider(line, scoreLatinTitle(line, 2))
+  let best: Group | null = null
+  for (const g of groups.values()) {
+    const total = g.n * 10 + g.score
+    const bestTotal = best ? best.n * 10 + best.score : -Infinity
+    if (total > bestTotal) best = g
+  }
+  return best?.line ?? null
+}
+
+const GENERIC_PLACE_WORD =
+  /^(church|kirche|kirke|kyrka|kirkko|chapel|cathedral|museum|castle|park|lake|station|tower|temple|shrine)$/i
+
+/** Map screenshots often have a single label ("Kaldfjord"), not a two-word title. */
+function singleLatinPlaceLabel(lines: string[]): string | null {
+  type Group = { n: number; line: string }
+  const groups = new Map<string, Group>()
+  for (const line of lines) {
+    const t = tidyLine(line).replace(/^[\\/|.\s]+|[\\/|.\s]+$/g, '')
+    if (!/^[A-ZÀ-Ý][a-zà-ÿøæåā-ž]{4,24}$/.test(t)) continue
+    if (GENERIC_PLACE_WORD.test(t) || isUiChrome(t) || isWeakLatinOcrTitle(t)) continue
+    const key = canonLatinKey(t)
+    const cur = groups.get(key) ?? { n: 0, line: t }
+    cur.n += 1
+    if (/fj/i.test(t) && !/fji/i.test(t)) cur.line = t
+    groups.set(key, cur)
+  }
+  let best: Group | null = null
+  for (const g of groups.values()) {
+    if (!best || g.n > best.n) best = g
+  }
+  return best?.line ?? null
 }
 
 function isKanaNoise(line: string): boolean {
@@ -391,13 +440,7 @@ export function parseLocationFromOcr(
   let address: string | null = null
   let description: string | null = null
 
-  for (const line of lines) {
-    const after = extractAddressFromDistanceLine(line)
-    if (after) {
-      address = after
-      continue
-    }
-  }
+  address = pickBestDistanceAddress(lines)
 
   const cjkLines = lines.filter(
     (l) =>
@@ -438,6 +481,10 @@ export function parseLocationFromOcr(
       latinNameCandidates(normalizeOcrText(`${passes.jpn}\n${passes.chi}`)),
       consensus,
     )
+  }
+  // Map labels are a single place name. Keep them when no multi-word title exists.
+  if (!latinTitle) {
+    latinTitle = singleLatinPlaceLabel(samePass ? lines : [...engLines, ...jpnChiLines])
   }
   // Caption locality ("In Bad Berka bei der Kirche") beats memorial titles.
   if (hintLocality) {
@@ -514,12 +561,13 @@ export function parseLocationFromOcr(
     if (/^[>\-ー0-9\s]+/.test(t) && !hasCjk(t.slice(0, 2))) return
     const cjkCount = (t.match(/[\u3040-\u30ff\u3400-\u9fff]/g) ?? []).length
     const latin = looksLikeLatinName(t)
+    const singlePlace = /^[A-ZÀ-Ý][a-zà-ÿøæåā-ž]{4,}$/.test(t)
     // Allow synonym expansions like "monastery Plasy" / "Klášter Plasy".
     const landmarkQuery =
       /^(monastery|abbey|convent|castle|church|museum|klášter)\b/i.test(t) ||
-      /\b(monastery|abbey|convent|castle|church)\s*$/i.test(t) ||
+      /\b(monastery|abbey|convent|castle|church|kirke|kyrka|kirkko)\s*$/i.test(t) ||
       /^Klášter\b/i.test(t)
-    if (cjkCount < 2 && !latin && !landmarkQuery) return
+    if (cjkCount < 2 && !latin && !landmarkQuery && !singlePlace) return
     if (!searchQueries.includes(t)) searchQueries.push(t)
   }
 
@@ -530,8 +578,9 @@ export function parseLocationFromOcr(
       address && /[A-Za-zÀ-ÿØøÅåÆæ]{3,}/.test(address) ? address : null
     // Town / landmark name first — "Bad Berka Kirche" alone often hits a street.
     for (const q of expandPlaceQueries(title, latinAddress)) push(q)
-    // "bei der Kirche" → bias toward the parish church in that town.
-    if (hasChurchHint(normalized)) {
+    // German "bei der Kirche" only — an English "Church" title should not
+    // emit Stadtkirche queries (those drown Nordic kirke lookups).
+    if (/\b(kirche|kapelle|stadtkirche|bei\s+der)\b/i.test(normalized)) {
       push(`Stadtkirche ${title}`)
       push(`${title} Stadtkirche`)
       push(`${title} Kirche`)
@@ -679,6 +728,40 @@ export function localityHints(parsed: ParsedLocation): string[] {
   return hints
 }
 
+function levenshtein(a: string, b: string): number {
+  const m = a.length
+  const n = b.length
+  const dp = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0))
+  for (let i = 0; i <= m; i += 1) dp[i]![0] = i
+  for (let j = 0; j <= n; j += 1) dp[0]![j] = j
+  for (let i = 1; i <= m; i += 1) {
+    for (let j = 1; j <= n; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1
+      dp[i]![j] = Math.min(
+        dp[i - 1]![j]! + 1,
+        dp[i]![j - 1]! + 1,
+        dp[i - 1]![j - 1]! + cost,
+      )
+    }
+  }
+  return dp[m]![n]!
+}
+
+/** Map label "Kaldfjord" corrects a noisy postcard stem ("Kagldfiord Church"). */
+export function alignStemWithMapLabel(title: string, mapLabel: string): string {
+  const m = title.match(
+    /^(.*)\s+(Church|Kirche|Kirke|Kyrka|Kirkko|Chapel|Cathedral|Museum|Castle)$/i,
+  )
+  const stem = (m?.[1] ?? title).trim()
+  const suffix = m?.[2]
+  const same = canonLatinKey(stem) === canonLatinKey(mapLabel)
+  const close =
+    levenshtein(canonLatinKey(stem), canonLatinKey(mapLabel)) <= 2 &&
+    mapLabel.length >= 5
+  if (!same && !close) return title
+  return suffix ? `${mapLabel} ${suffix}` : mapLabel
+}
+
 function isWeakOrCommemorativeTitle(title: string | null | undefined): boolean {
   if (!title) return true
   if (isCommemorativePhrase(title)) return true
@@ -709,10 +792,17 @@ export function mergeParsedLocations(
   }
   if (parts.length === 1) return parts[0]!
 
-  const title =
+  const mapLabel = parts
+    .slice(1)
+    .map((p) => p.title)
+    .find((t) => t && !/\s/.test(t) && !isWeakOrCommemorativeTitle(t))
+  let title =
     parts.find((p) => p.title && !isWeakOrCommemorativeTitle(p.title))?.title ??
     parts.find((p) => p.title)?.title ??
     null
+  if (title && mapLabel && title !== mapLabel) {
+    title = alignStemWithMapLabel(title, mapLabel)
+  }
 
   const address =
     parts.find((p) => p.address && looksLikeAddress(p.address))?.address ??
@@ -737,6 +827,8 @@ export function mergeParsedLocations(
   const preferred = parts.find((p) => p.title === title)
   if (preferred) {
     for (const q of preferred.searchQueries) push(q)
+  } else if (title && looksLikeLatinName(title)) {
+    for (const q of expandPlaceQueries(title, address)) push(q)
   }
   // Memorial postcards often sit by the parish church; when OCR missed
   // "bei der Kirche" but raw text still looks commemorative, bias queries.

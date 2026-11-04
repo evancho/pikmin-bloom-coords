@@ -73,7 +73,7 @@ const REGION_BOXES: Array<{
     countrycodes: 'jp',
   },
   {
-    match: /Troms[øo]|Kval[øo]ya|Kaldfjord/i,
+    match: /Troms[øo]|Kval[øo]ya|Kald(?:fj|fi)ord/i,
     label: 'tromso',
     viewbox: { south: 69.0, north: 70.2, west: 17.5, east: 20.5 },
     countrycodes: 'no',

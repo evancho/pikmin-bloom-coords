@@ -252,24 +252,35 @@ function voteTexts(parts: Array<{ text: string; confidence: number }>): string {
       b.confidence - a.confidence || b.text.length - a.text.length,
   )
   // Prefer a string that appears in more than one pass.
-  const counts = new Map<string, { n: number; conf: number }>()
+  const counts = new Map<string, { n: number; conf: number; text: string }>()
   for (const s of scored) {
-    const key = s.text.toLowerCase()
-    const cur = counts.get(key) ?? { n: 0, conf: 0 }
+    const key = s.text
+      .toLowerCase()
+      .replace(/fji/g, 'fj')
+      .replace(/fi/g, 'fj')
+    const cur = counts.get(key) ?? { n: 0, conf: 0, text: s.text }
     cur.n += 1
-    cur.conf = Math.max(cur.conf, s.confidence)
+    if (
+      s.confidence > cur.conf ||
+      (/fj/i.test(s.text) && !/fji/i.test(s.text) && !/fj/i.test(cur.text))
+    ) {
+      cur.conf = Math.max(cur.conf, s.confidence)
+      cur.text = s.text
+    } else {
+      cur.conf = Math.max(cur.conf, s.confidence)
+    }
     counts.set(key, cur)
   }
-  let bestKey = scored[0]!.text
+  let bestText = scored[0]!.text
   let bestScore = -1
-  for (const [key, v] of counts) {
+  for (const v of counts.values()) {
     const score = v.n * 10 + v.conf
     if (score > bestScore) {
       bestScore = score
-      bestKey = scored.find((s) => s.text.toLowerCase() === key)?.text ?? key
+      bestText = v.text
     }
   }
-  return bestKey
+  return bestText
 }
 
 export async function recognizeText(
@@ -383,10 +394,6 @@ export async function recognizeText(
         jpnText = [voteTexts(cjkVotes), ...cjkVotes.map((v) => v.text)]
           .filter(Boolean)
           .join('\n')
-        // Consensus: if jpn also produces Latin-looking title, keep it.
-        if (/[A-Za-zÀ-ÿ]{4,}/.test(jpnText)) {
-          engText = `${engText}\n${jpnText}`
-        }
       }
     }
 
